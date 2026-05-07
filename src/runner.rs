@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::config::AnalysisConfig;
 use crate::debug::report_memory;
 use crate::imports::ImportGraph;
 use crate::module_safety;
@@ -46,19 +47,19 @@ pub fn run_pipeline(
     root_dir: &std::path::Path,
     caching: CachingMode,
 ) -> Result<PipelineResult> {
-    let sys_info = crate::pyrefly::sys_info::SysInfo::lg_default();
+    let config = AnalysisConfig::new(crate::pyrefly::sys_info::SysInfo::lg_default());
 
     let sources = time("Building sources", || {
         Sources::new(src_map, root_dir.to_path_buf())
     });
 
     let (import_graph, exports) = time("Creating import graph and exports", || {
-        ImportGraph::make_with_exports(&sources, &sys_info)
+        ImportGraph::make_with_exports(&sources, &config)
     });
     report_memory("After creating import graph and exports");
 
     let output = time("Analyzing AST", || {
-        project::run_analysis(&sources, &exports, &import_graph, &sys_info, caching)
+        project::run_analysis(&sources, &exports, &import_graph, &config, caching)
     });
     report_memory("After analyzing AST");
 

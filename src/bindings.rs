@@ -707,12 +707,11 @@ fn get_numeric_type(n: &ExprNumberLiteral) -> &str {
 mod tests {
 
     use super::*;
+    use crate::config::AnalysisConfig;
     use crate::module_info::build_definitions_and_classes;
     use crate::module_parser::parse_pyi;
-    use crate::pyrefly::sys_info::SysInfo;
     use crate::source_map::ModuleProvider;
     use crate::test_lib::*;
-    use crate::traits::SysInfoExt;
 
     pub fn make_bindings(module: &str, modules: &[(&str, &str)]) -> BindingsTable {
         make_bindings_impl(module, modules, &[])
@@ -733,22 +732,22 @@ mod tests {
     ) -> BindingsTable {
         let mod_name = ModuleName::from_str(module);
         let sources = TestSources::new_with_stubs(modules, stub_names);
-        let sys_info = SysInfo::lg_default();
+        let config = AnalysisConfig::default();
         let ast_result = sources.parse(&mod_name).expect("module not found");
         let parsed_module = ast_result.as_parsed().expect("module failed to parse");
-        let (definitions, _classes) = build_definitions_and_classes(parsed_module, &sys_info);
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let (definitions, _classes) = build_definitions_and_classes(parsed_module, &config);
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         BindingsTable::new(&definitions, &exports, &import_graph, parsed_module)
     }
 
     pub fn make_stub_bindings(module: &str, modules: &[(&str, &str)]) -> BindingsTable {
         let mod_name = ModuleName::from_str(module);
         let sources = TestSources::new(modules);
-        let sys_info = SysInfo::lg_default();
+        let config = AnalysisConfig::default();
         let code = sources.get_code(&mod_name).expect("module not found");
         let parsed_module = parse_pyi(code, mod_name, false);
-        let (definitions, _classes) = build_definitions_and_classes(&parsed_module, &sys_info);
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let (definitions, _classes) = build_definitions_and_classes(&parsed_module, &config);
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         BindingsTable::new(&definitions, &exports, &import_graph, &parsed_module)
     }
 

@@ -10,15 +10,14 @@
 #[cfg(test)]
 mod tests {
 
+    use lifeguard::config::AnalysisConfig;
     use lifeguard::imports::ImportGraph;
     use lifeguard::output::LifeGuardAnalysis;
     use lifeguard::project;
     use lifeguard::pyrefly::module_name::ModuleName;
-    use lifeguard::pyrefly::sys_info::SysInfo;
     use lifeguard::runner::Options;
     use lifeguard::test_lib::TestSources;
     use lifeguard::test_lib::assert_str_keys;
-    use lifeguard::traits::SysInfoExt;
 
     fn test_options() -> Options {
         Options {
@@ -29,13 +28,13 @@ mod tests {
 
     fn run_cycle_analysis(modules: &Vec<(&str, &str)>) -> LifeGuardAnalysis {
         let sources = TestSources::new(modules);
-        let sys_info = SysInfo::lg_default();
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         let output = project::run_analysis(
             &sources,
             &exports,
             &import_graph,
-            &sys_info,
+            &config,
             project::CachingMode::Disabled,
         );
         let mut analysis =

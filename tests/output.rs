@@ -7,6 +7,7 @@
 
 #[cfg(test)]
 mod tests {
+    use lifeguard::config::AnalysisConfig;
     use lifeguard::errors::ErrorKind;
     use lifeguard::errors::ErrorMetadata;
     use lifeguard::errors::SafetyError;
@@ -20,11 +21,9 @@ mod tests {
     use lifeguard::project;
     use lifeguard::project::SafetyMap;
     use lifeguard::pyrefly::module_name::ModuleName;
-    use lifeguard::pyrefly::sys_info::SysInfo;
     use lifeguard::runner::Options;
     use lifeguard::test_lib::TestSources;
     use lifeguard::test_lib::assert_str_keys;
-    use lifeguard::traits::SysInfoExt;
     use ruff_text_size::TextRange;
     use starlark_map::small_set::SmallSet;
 
@@ -101,13 +100,13 @@ mod tests {
 
     fn run_lifeguard_analysis(modules: &Vec<(&str, &str)>) -> LifeGuardAnalysis {
         let sources = TestSources::new(modules);
-        let sys_info = SysInfo::lg_default();
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         let output = project::run_analysis(
             &sources,
             &exports,
             &import_graph,
-            &sys_info,
+            &config,
             project::CachingMode::Disabled,
         );
         let mut analysis =
@@ -726,13 +725,13 @@ mod tests {
 
     fn run_lifeguard_analysis_verbose(modules: &Vec<(&str, &str)>) -> LifeGuardAnalysis {
         let sources = TestSources::new(modules);
-        let sys_info = SysInfo::lg_default();
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         let output = project::run_analysis(
             &sources,
             &exports,
             &import_graph,
-            &sys_info,
+            &config,
             project::CachingMode::Disabled,
         );
         let mut analysis = LifeGuardAnalysis::new(
@@ -859,13 +858,13 @@ mod tests {
         "#;
         let modules = vec![("a", code_a), ("b", code_b), ("c", code_c)];
         let sources = TestSources::new(&modules);
-        let sys_info = SysInfo::lg_default();
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         let output = project::run_analysis(
             &sources,
             &exports,
             &import_graph,
-            &sys_info,
+            &config,
             project::CachingMode::Disabled,
         );
         for module_name in ["a", "b", "c"] {
@@ -949,13 +948,13 @@ mod tests {
 
         let modules = vec![("a", a_code)];
         let sources = TestSources::new(&modules).with_parse_errors(&["broken"]);
-        let sys_info = SysInfo::lg_default();
-        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
         let output = project::run_analysis(
             &sources,
             &exports,
             &import_graph,
-            &sys_info,
+            &config,
             project::CachingMode::Disabled,
         );
 

@@ -32,9 +32,9 @@ use starlark_map::small_map::Entry;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
+use crate::config::AnalysisConfig;
 use crate::imports::ImportlibState;
 use crate::pyrefly::globals::Global;
-use crate::pyrefly::sys_info::SysInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MutableCaptureKind {
@@ -191,7 +191,7 @@ struct DefinitionsBuilder<'a> {
     module_name: ModuleName,
     is_init: bool,
     is_stub: bool,
-    sys_info: &'a SysInfo,
+    config: &'a AnalysisConfig,
     inner: Definitions,
 }
 
@@ -233,11 +233,11 @@ impl Definitions {
         module_name: ModuleName,
         is_init: bool,
         is_stub: bool,
-        sys_info: &SysInfo,
+        config: &AnalysisConfig,
     ) -> Self {
         let mut builder = DefinitionsBuilder {
             module_name,
-            sys_info,
+            config,
             is_init,
             is_stub,
             inner: Definitions::default(),
@@ -722,7 +722,7 @@ impl<'a> DefinitionsBuilder<'a> {
             }
             Stmt::If(x) => {
                 self.named_in_expr(&x.test);
-                for (_, body) in self.sys_info.pruned_if_branches(x) {
+                for (_, body) in self.config.sys_info.pruned_if_branches(x) {
                     self.stmts(body);
                 }
                 return; // We went through the relevant branches already
@@ -795,8 +795,8 @@ mod tests {
     use pyrefly_util::prelude::SliceExt;
 
     use super::*;
+    use crate::config::AnalysisConfig;
     use crate::traits::AstExt;
-    use crate::traits::SysInfoExt;
 
     #[test]
     fn test_implicitly_imported_submodule() {
@@ -845,12 +845,13 @@ mod tests {
         module_name: ModuleName,
         is_init: bool,
     ) -> Definitions {
+        let config = AnalysisConfig::default();
         let mut res = Definitions::new(
             &Ast::parse_py(contents).0.body,
             module_name,
             is_init,
             false, /* is_stub */
-            &SysInfo::lg_default(),
+            &config,
         );
         res.dunder_all.iter_mut().for_each(unrange);
         res
@@ -1151,12 +1152,13 @@ import _thread
 
 Lock = _thread.LockType
 "#;
+        let config = AnalysisConfig::default();
         let defs = Definitions::new(
             &Ast::parse_py(code).0.body,
             ModuleName::from_str("threading"),
             false, /* is_init */
             true,  /* is_stub */
-            &SysInfo::lg_default(),
+            &config,
         );
         let lock = defs.definitions.get(&Name::new_static("Lock")).unwrap();
         assert_eq!(
@@ -1173,12 +1175,13 @@ from _thread import _ExceptHookArgs
 
 ExceptHookArgs = _ExceptHookArgs
 "#;
+        let config = AnalysisConfig::default();
         let defs = Definitions::new(
             &Ast::parse_py(code).0.body,
             ModuleName::from_str("threading"),
             false, /* is_init */
             true,  /* is_stub */
-            &SysInfo::lg_default(),
+            &config,
         );
         let ehargs = defs
             .definitions
@@ -1201,12 +1204,13 @@ import _thread
 
 error = _thread.error
 "#;
+        let config = AnalysisConfig::default();
         let defs = Definitions::new(
             &Ast::parse_py(code).0.body,
             ModuleName::from_str("threading"),
             false, /* is_init */
             true,  /* is_stub */
-            &SysInfo::lg_default(),
+            &config,
         );
         let err = defs.definitions.get(&Name::new_static("error")).unwrap();
         assert_eq!(
@@ -1223,12 +1227,13 @@ import _thread
 
 Lock = _thread.LockType
 "#;
+        let config = AnalysisConfig::default();
         let defs = Definitions::new(
             &Ast::parse_py(code).0.body,
             ModuleName::from_str("threading"),
             false, /* is_init */
             false, /* is_stub */
-            &SysInfo::lg_default(),
+            &config,
         );
         let lock = defs.definitions.get(&Name::new_static("Lock")).unwrap();
         assert_eq!(

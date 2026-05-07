@@ -25,6 +25,7 @@ use crate::analyzer::AnalyzedModule;
 use crate::class::Class;
 use crate::class::ClassTable;
 use crate::class::FieldKind;
+use crate::config::AnalysisConfig;
 use crate::effects::Effect;
 use crate::effects::EffectData;
 use crate::effects::EffectKind;
@@ -38,7 +39,6 @@ use crate::module_parser::ParsedModule;
 pub use crate::module_safety::FunctionSafety;
 use crate::module_safety::ModuleSafety;
 use crate::module_safety::SafetyResult;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::source_map::AstResult;
 use crate::source_map::ModuleProvider;
 use crate::stubs::Stubs;
@@ -62,7 +62,7 @@ struct AnalysisContext<'a> {
     exports: &'a Exports,
     import_graph: &'a ImportGraph,
     stubs: &'a Stubs,
-    sys_info: &'a SysInfo,
+    config: &'a AnalysisConfig,
 }
 
 /// Shared immutable context for computing implicit imports.
@@ -330,10 +330,10 @@ pub fn run_analysis(
     sources: &impl ModuleProvider,
     exports: &Exports,
     import_graph: &ImportGraph,
-    sys_info: &SysInfo,
+    config: &AnalysisConfig,
     caching: CachingMode,
 ) -> AnalysisOutput {
-    let (analysis_map, parse_errors) = analyze_all(sources, exports, import_graph, sys_info);
+    let (analysis_map, parse_errors) = analyze_all(sources, exports, import_graph, config);
     let side_effect_imports = time("  Computing side-effect imports", || {
         compute_side_effect_imports(&analysis_map)
     });
@@ -719,13 +719,7 @@ fn analyze_module(
     module: &ParsedModule,
     ctx: &AnalysisContext,
 ) -> (ModuleName, AnalyzedModule) {
-    let output = analyzer::analyze(
-        module,
-        ctx.exports,
-        ctx.import_graph,
-        ctx.stubs,
-        ctx.sys_info,
-    );
+    let output = analyzer::analyze(module, ctx.exports, ctx.import_graph, ctx.stubs, ctx.config);
     (mod_name, output)
 }
 
@@ -735,13 +729,13 @@ pub fn analyze_all(
     sources: &impl ModuleProvider,
     exports: &Exports,
     import_graph: &ImportGraph,
-    sys_info: &SysInfo,
+    config: &AnalysisConfig,
 ) -> (AnalysisMap, ParseErrors) {
     let ctx = AnalysisContext {
         exports,
         import_graph,
         stubs: sources.stubs(),
-        sys_info,
+        config,
     };
 
     let parse_errors = ParseErrors::new();

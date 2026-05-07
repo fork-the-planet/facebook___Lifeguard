@@ -12,14 +12,13 @@ use clap::Parser;
 use ruff_python_ast::PySourceType;
 
 use crate::analyzer;
+use crate::config::AnalysisConfig;
 use crate::debug::print_module_imports_map;
 use crate::imports::ImportGraph;
 use crate::module_parser;
 use crate::pyrefly::module_name::ModuleName;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::source_map::ModuleProvider;
 use crate::test_lib::TestSources;
-use crate::traits::SysInfoExt;
 
 #[derive(Parser)]
 pub struct ShowEffectsArgs {
@@ -32,8 +31,8 @@ pub fn run(args: ShowEffectsArgs) -> Result<()> {
     let source = std::fs::read_to_string(&path)?;
 
     let sources = TestSources::new(&[("current_module", &source)]);
-    let sys_info = SysInfo::lg_default();
-    let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+    let config = AnalysisConfig::default();
+    let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
 
     // Run the analysis
     let typ = module_parser::file_source_type(&path).unwrap();
@@ -41,7 +40,7 @@ pub fn run(args: ShowEffectsArgs) -> Result<()> {
         .file_name()
         .is_some_and(|f| f == "__init__.py" || f == "__init__.pyi");
     let module = module_parser::parse_file(&source, typ, module_name, is_init);
-    let output = analyzer::analyze(&module, &exports, &import_graph, sources.stubs(), &sys_info);
+    let output = analyzer::analyze(&module, &exports, &import_graph, sources.stubs(), &config);
 
     // Display output
     let module_effects = output.module_effects;

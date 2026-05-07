@@ -23,6 +23,7 @@ use crate::class::Class;
 use crate::class::ClassTable;
 use crate::class::Field;
 use crate::class::FieldKind;
+use crate::config::AnalysisConfig;
 use crate::cursor::Cursor;
 use crate::exports::Exports;
 use crate::imports::ImportGraph;
@@ -32,7 +33,6 @@ use crate::pyrefly::definitions::Definition;
 use crate::pyrefly::definitions::DefinitionStyle;
 use crate::pyrefly::definitions::Definitions;
 use crate::pyrefly::definitions::MutableCaptureKind;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::stubs::Stubs;
 use crate::traits::DefinitionExt;
 use crate::traits::DefinitionsExt;
@@ -176,12 +176,12 @@ impl<'a> ResolvedName<'a> {
 #[derive(Debug)]
 pub struct ModuleInfo<'a> {
     pub module_name: ModuleName,
+    pub config: &'a AnalysisConfig,
     pub definitions: DefinitionTable,
     pub bindings: BindingsTable,
     pub classes: ClassTable,
     pub exports: &'a Exports,
     pub stubs: &'a Stubs,
-    pub sys_info: &'a SysInfo,
 }
 
 impl<'a> ModuleInfo<'a> {
@@ -190,20 +190,20 @@ impl<'a> ModuleInfo<'a> {
         exports: &'a Exports,
         import_graph: &'a ImportGraph,
         stubs: &'a Stubs,
-        sys_info: &'a SysInfo,
+        config: &'a AnalysisConfig,
     ) -> Self {
         let module_name = parsed_module.name;
-        let (definitions, classes) = build_definitions_and_classes(parsed_module, sys_info);
+        let (definitions, classes) = build_definitions_and_classes(parsed_module, config);
         let bindings = BindingsTable::new(&definitions, exports, import_graph, parsed_module);
 
         Self {
             module_name,
+            config,
             definitions,
             bindings,
             exports,
             classes,
             stubs,
-            sys_info,
         }
     }
 
@@ -250,11 +250,9 @@ impl<'a> ModuleInfo<'a> {
 
 pub fn build_definitions_and_classes(
     parsed_module: &ParsedModule,
-    sys_info: &SysInfo,
+    config: &AnalysisConfig,
 ) -> (DefinitionTable, ClassTable) {
-    // Build both data structures in a single pass to reduce the number of
-    // necessary AST traversals
-    let mut builder = CombinedDefinitionClassBuilder::new(parsed_module, sys_info);
+    let mut builder = CombinedDefinitionClassBuilder::new(parsed_module, config);
     builder.process_module(&parsed_module.ast.body);
     builder.finalize()
 }
@@ -272,7 +270,7 @@ pub fn get_import_module_state_from_def(
 struct CombinedDefinitionClassBuilder<'a> {
     module_name: ModuleName,
     is_init: bool,
-    sys_info: &'a SysInfo,
+    config: &'a AnalysisConfig,
     cursor: Cursor,
 
     // DefinitionTable fields
@@ -287,11 +285,11 @@ struct CombinedDefinitionClassBuilder<'a> {
 }
 
 impl<'a> CombinedDefinitionClassBuilder<'a> {
-    fn new(parsed_module: &ParsedModule, sys_info: &'a SysInfo) -> Self {
+    fn new(parsed_module: &ParsedModule, config: &'a AnalysisConfig) -> Self {
         Self {
             module_name: parsed_module.name,
             is_init: parsed_module.is_init,
-            sys_info,
+            config,
             cursor: Cursor::new(),
             definitions_map: AHashMap::new(),
             eager_scopes: AHashSet::new(),
@@ -312,7 +310,7 @@ impl<'a> CombinedDefinitionClassBuilder<'a> {
         let scope = self.cursor.scope();
 
         // Extract definitions for this scope (DefinitionTable)
-        let defs = Definitions::make(body, self.module_name, self.is_init, self.sys_info);
+        let defs = Definitions::make(body, self.module_name, self.is_init, self.config);
         self.definitions_map.insert(scope, defs);
 
         if self.cursor.in_eager_scope() {
@@ -553,10 +551,10 @@ impl<'a> CombinedDefinitionClassBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AnalysisConfig;
     use crate::module_parser::parse_source;
     use crate::test_lib::assert_str_keys;
     use crate::traits::AstExt;
-    use crate::traits::SysInfoExt;
 
     #[test]
     fn test_module_reachability() {
@@ -576,9 +574,9 @@ class C:
         let parsed_module = parse_source(code, mod_name, false);
         let import_graph = ImportGraph::new();
         let stubs = Stubs::new();
-        let sys_info = SysInfo::lg_default();
-        let exports = Exports::new(&parsed_module, &import_graph, &sys_info);
-        let info = ModuleInfo::new(&parsed_module, &exports, &import_graph, &stubs, &sys_info);
+        let config = AnalysisConfig::default();
+        let exports = Exports::new(&parsed_module, &import_graph, &config.sys_info);
+        let info = ModuleInfo::new(&parsed_module, &exports, &import_graph, &stubs, &config);
         let resolve = |scopes: &[&str], name: &str| -> Option<ResolvedName> {
             // Turn a string like "mod.Class.func" into a Cursor, by assuming the first item is
             // always a module and only classes start with an uppercase character.
@@ -616,8 +614,8 @@ from . import child
 "#;
         let mod_name = ModuleName::from_str("pkg");
         let parsed_module = parse_source(code, mod_name, true);
-        let sys_info = SysInfo::lg_default();
-        let (definitions, _classes) = build_definitions_and_classes(&parsed_module, &sys_info);
+        let config = AnalysisConfig::default();
+        let (definitions, _classes) = build_definitions_and_classes(&parsed_module, &config);
         let defs = definitions.definitions.get(&mod_name).unwrap();
         let submodules: Vec<&str> = defs
             .implicitly_imported_submodules
@@ -640,8 +638,8 @@ import pkg.sub
 "#;
         let mod_name = ModuleName::from_str("pkg");
         let parsed_module = parse_source(code, mod_name, false);
-        let sys_info = SysInfo::lg_default();
-        let (definitions, _classes) = build_definitions_and_classes(&parsed_module, &sys_info);
+        let config = AnalysisConfig::default();
+        let (definitions, _classes) = build_definitions_and_classes(&parsed_module, &config);
         let defs = definitions.definitions.get(&mod_name).unwrap();
         assert!(
             defs.implicitly_imported_submodules.is_empty(),
@@ -663,9 +661,9 @@ def f(x, y):
         let parsed_module = parse_source(code, mod_name, false);
         let import_graph = ImportGraph::new();
         let stubs = Stubs::new();
-        let sys_info = SysInfo::lg_default();
-        let exports = Exports::new(&parsed_module, &import_graph, &sys_info);
-        let info = ModuleInfo::new(&parsed_module, &exports, &import_graph, &stubs, &sys_info);
+        let config = AnalysisConfig::default();
+        let exports = Exports::new(&parsed_module, &import_graph, &config.sys_info);
+        let info = ModuleInfo::new(&parsed_module, &exports, &import_graph, &stubs, &config);
         let scope = ModuleName::from_str("test.f");
         let defs = info.definitions.definitions.get(&scope).unwrap();
         assert_str_keys(defs.definitions.keys(), vec!["x", "y"]);
@@ -682,9 +680,9 @@ def f(x, y):
         let parsed_module = parse_source(code, mod_name, false);
         let import_graph = ImportGraph::new();
         let stubs = Stubs::new();
-        let sys_info = SysInfo::lg_default();
-        let exports = Exports::new(&parsed_module, &import_graph, &sys_info);
-        let info = ModuleInfo::new(&parsed_module, &exports, &import_graph, &stubs, &sys_info);
+        let config = AnalysisConfig::default();
+        let exports = Exports::new(&parsed_module, &import_graph, &config.sys_info);
+        let info = ModuleInfo::new(&parsed_module, &exports, &import_graph, &stubs, &config);
 
         let mut cursor = Cursor::new();
         for (i, scope_name) in scopes.iter().enumerate() {

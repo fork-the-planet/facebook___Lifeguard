@@ -7,11 +7,10 @@
 
 #[cfg(test)]
 mod tests {
+    use lifeguard::config::AnalysisConfig;
     use lifeguard::imports::ImportGraph;
     use lifeguard::pyrefly::module_name::ModuleName;
-    use lifeguard::pyrefly::sys_info::SysInfo;
     use lifeguard::test_lib::TestSources;
-    use lifeguard::traits::SysInfoExt;
 
     /// Helper to get all imports for a module from the import graph
     fn get_imports(graph: &ImportGraph, module: &str) -> Vec<String> {
@@ -36,8 +35,8 @@ baz = 1
         let modules = vec![("__main__", main), ("foo", foo), ("bar", bar)];
 
         let sources = TestSources::new(&modules);
-        let sys_info = SysInfo::lg_default();
-        let import_graph = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let import_graph = ImportGraph::make(&sources, &config);
 
         let imports = get_imports(&import_graph, "__main__");
         assert!(
@@ -71,8 +70,8 @@ nested_name = 1
         ];
 
         let sources = TestSources::new(&modules);
-        let sys_info = SysInfo::lg_default();
-        let import_graph = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let import_graph = ImportGraph::make(&sources, &config);
 
         let imports = get_imports(&import_graph, "__main__");
 
@@ -110,8 +109,8 @@ method_name = 1
         ];
 
         let sources = TestSources::new(&modules);
-        let sys_info = SysInfo::lg_default();
-        let import_graph = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let import_graph = ImportGraph::make(&sources, &config);
 
         let imports = get_imports(&import_graph, "__main__");
 
@@ -155,8 +154,8 @@ secret = "value"
         ];
 
         let sources = TestSources::new(&modules);
-        let sys_info = SysInfo::lg_default();
-        let import_graph = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let import_graph = ImportGraph::make(&sources, &config);
 
         // Check that __main__ imports decorators (module-level, tracked)
         let main_imports = get_imports(&import_graph, "__main__");

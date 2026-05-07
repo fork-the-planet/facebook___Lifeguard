@@ -22,9 +22,9 @@ use ruff_python_ast::StmtImport;
 use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::name::Name;
 
+use crate::config::AnalysisConfig;
 use crate::exports::Exports;
 use crate::graph::Graph;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::source_map::AstResult;
 use crate::source_map::ModuleProvider;
 use crate::tracing::time;
@@ -205,13 +205,16 @@ impl ImportGraph {
     }
 
     /// Build an import graph
-    pub fn make(sources: &impl ModuleProvider, sys_info: &SysInfo) -> Self {
-        ImportGraphBuilder::with_capacity(sources.len(), sys_info).build(sources)
+    pub fn make(sources: &impl ModuleProvider, config: &AnalysisConfig) -> Self {
+        ImportGraphBuilder::with_capacity(sources.len(), config).build(sources)
     }
 
     /// Build an import graph and collect exports in a single pass
-    pub fn make_with_exports(sources: &impl ModuleProvider, sys_info: &SysInfo) -> (Self, Exports) {
-        ImportGraphBuilder::with_capacity(sources.len(), sys_info).build_with_exports(sources)
+    pub fn make_with_exports(
+        sources: &impl ModuleProvider,
+        config: &AnalysisConfig,
+    ) -> (Self, Exports) {
+        ImportGraphBuilder::with_capacity(sources.len(), config).build_with_exports(sources)
     }
 
     /// Get a parallel iterator over all modules in the graph.
@@ -271,22 +274,24 @@ struct ModuleImportCollector<'a> {
     module: ModuleName,
     is_init: bool,
     graph: &'a Graph,
-    sys_info: &'a SysInfo,
+    config: &'a AnalysisConfig,
     imports: Imports,
-    // keep track of whether importlib has been imported
     has_importlib: bool,
-    // keep track of whether import_module has been imported from importlib
-    // we need this to process import_module calls
     has_import_module: bool,
 }
 
 impl<'a> ModuleImportCollector<'a> {
-    fn new(module: ModuleName, is_init: bool, graph: &'a Graph, sys_info: &'a SysInfo) -> Self {
+    fn new(
+        module: ModuleName,
+        is_init: bool,
+        graph: &'a Graph,
+        config: &'a AnalysisConfig,
+    ) -> Self {
         Self {
             module,
             is_init,
             graph,
-            sys_info,
+            config,
             imports: Imports::new(),
             has_importlib: false,
             has_import_module: false,
@@ -299,7 +304,7 @@ impl<'a> ModuleImportCollector<'a> {
     }
 
     fn if_(&mut self, s: &StmtIf) {
-        for (_, body) in self.sys_info.pruned_if_branches(s) {
+        for (_, body) in self.config.sys_info.pruned_if_branches(s) {
             self.stmts(body);
         }
     }
@@ -412,16 +417,16 @@ impl<'a> ModuleImportCollector<'a> {
 struct ImportGraphBuilder<'a> {
     graph: Graph,
     missing: AHashMap<ModuleName, AHashSet<ModuleName>>,
-    sys_info: &'a SysInfo,
+    config: &'a AnalysisConfig,
 }
 
 impl<'a> ImportGraphBuilder<'a> {
-    fn with_capacity(node_count: usize, sys_info: &'a SysInfo) -> Self {
+    fn with_capacity(node_count: usize, config: &'a AnalysisConfig) -> Self {
         Self {
             // 4x edge estimate: dotted imports like `a.b.c` expand into multiple edges
             graph: Graph::with_capacity(node_count, node_count * 4),
             missing: AHashMap::new(),
-            sys_info,
+            config,
         }
     }
 
@@ -439,8 +444,7 @@ impl<'a> ImportGraphBuilder<'a> {
         ast_result: &AstResult,
     ) -> Option<(ModuleName, Imports)> {
         let module = ast_result.as_parsed().ok()?;
-        let collector =
-            ModuleImportCollector::new(name, module.is_init, &self.graph, self.sys_info);
+        let collector = ModuleImportCollector::new(name, module.is_init, &self.graph, self.config);
         let imports = collector.collect(&module.ast);
         Some((name, imports))
     }
@@ -506,7 +510,7 @@ impl<'a> ImportGraphBuilder<'a> {
                         }
                         let imports = self.collect_imports(*name, &ast_result)?;
                         let module = ast_result.as_parsed().ok()?;
-                        let exports = Exports::new_unfiltered(module, self.sys_info);
+                        let exports = Exports::new_unfiltered(module, &self.config.sys_info);
                         Some(Ok((imports, exports)))
                     })
                     .collect()

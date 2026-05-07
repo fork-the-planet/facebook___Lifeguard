@@ -10,12 +10,12 @@ use pyrefly_python::module_name::ModuleName;
 use ruff_python_ast::PySourceType;
 
 use crate::class::ClassTable;
+use crate::config::AnalysisConfig;
 use crate::exports::Exports;
 use crate::imports::ImportGraph;
 use crate::module_effects::ModuleEffects;
 use crate::module_info::DefinitionTable;
 use crate::module_parser::ParsedModule;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::source_analyzer;
 use crate::stub_analyzer;
 use crate::stubs::Stubs;
@@ -51,27 +51,26 @@ pub trait Analyzer<'a> {
         exports: &'a Exports,
         import_graph: &'a ImportGraph,
         stubs: &'a Stubs,
-        sys_info: &'a SysInfo,
+        config: &'a AnalysisConfig,
     ) -> Self;
 
     fn analyze(self) -> AnalyzedModule;
 }
 
-// Type alias for analyze functions
-pub type AnalyzeFn = fn(&ParsedModule, &Exports, &ImportGraph, &Stubs, &SysInfo) -> AnalyzedModule;
+pub type AnalyzeFn =
+    fn(&ParsedModule, &Exports, &ImportGraph, &Stubs, &AnalysisConfig) -> AnalyzedModule;
 
-// Analyze a single module
 pub fn analyze(
     parsed_module: &ParsedModule,
     exports: &Exports,
     import_graph: &ImportGraph,
     stubs: &Stubs,
-    sys_info: &SysInfo,
+    config: &AnalysisConfig,
 ) -> AnalyzedModule {
     let analyzer: AnalyzeFn = match parsed_module.source_type {
         PySourceType::Python => source_analyzer::analyze,
         PySourceType::Stub => stub_analyzer::analyze,
         _ => panic!("Unexpected module type"),
     };
-    analyzer(parsed_module, exports, import_graph, stubs, sys_info)
+    analyzer(parsed_module, exports, import_graph, stubs, config)
 }

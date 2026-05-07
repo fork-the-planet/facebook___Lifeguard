@@ -7,12 +7,11 @@
 
 #[cfg(test)]
 mod tests {
+    use lifeguard::config::AnalysisConfig;
     use lifeguard::imports::ImportGraph;
     use lifeguard::pyrefly::module_name::ModuleName;
-    use lifeguard::pyrefly::sys_info::SysInfo;
     use lifeguard::test_lib::TestSources;
     use lifeguard::test_lib::module_names;
-    use lifeguard::traits::SysInfoExt;
 
     fn assert_deps(g: &ImportGraph, module: &str, expected: Vec<&str>) {
         let m = ModuleName::from_str(module);
@@ -34,8 +33,8 @@ mod tests {
 
     fn build_import_graph(modules: &Vec<(&str, &str)>) -> ImportGraph {
         let sources = TestSources::new(modules);
-        let sys_info = SysInfo::lg_default();
-        ImportGraph::make(&sources, &sys_info)
+        let config = AnalysisConfig::default();
+        ImportGraph::make(&sources, &config)
     }
 
     #[test]
@@ -288,8 +287,8 @@ else:
         let sources = TestSources::new(&[("a", "import b")]).with_parse_errors(&["b"]);
         let b = ModuleName::from_str("b");
 
-        let sys_info = SysInfo::lg_default();
-        let g = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let g = ImportGraph::make(&sources, &config);
 
         assert!(
             !g.contains(&b),
@@ -308,8 +307,8 @@ else:
             TestSources::new(&[("a", "from broken import foo")]).with_parse_errors(&["broken"]);
         let broken = ModuleName::from_str("broken");
 
-        let sys_info = SysInfo::lg_default();
-        let g = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let g = ImportGraph::make(&sources, &config);
 
         assert!(!g.contains(&broken));
         assert!(
@@ -324,8 +323,8 @@ else:
             TestSources::new(&[("a", "pass"), ("c", "import a.b")]).with_parse_errors(&["a.b"]);
         let a_b = ModuleName::from_str("a.b");
 
-        let sys_info = SysInfo::lg_default();
-        let g = ImportGraph::make(&sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let g = ImportGraph::make(&sources, &config);
 
         assert!(g.contains(&ModuleName::from_str("a")));
         assert!(!g.contains(&a_b));

@@ -19,6 +19,7 @@ use rayon::prelude::*;
 use tempfile::TempDir;
 
 use crate::analyzer::analyze;
+use crate::config::AnalysisConfig;
 use crate::effects::Effect;
 use crate::errors::SafetyError;
 use crate::exports::Exports;
@@ -32,13 +33,11 @@ use crate::module_safety::ModuleSafety;
 use crate::project;
 use crate::project::AnalysisMap;
 use crate::project::SafetyMap;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::source_map::AstResult;
 use crate::source_map::ModuleProvider;
 use crate::stubs::Stubs;
 use crate::traits::AsStr;
 use crate::traits::ModuleExt;
-use crate::traits::SysInfoExt;
 
 // ---------------------------------------------------------------------------
 // TestSources: in-memory ModuleProvider for tests
@@ -233,9 +232,9 @@ fn check_output(
     check: Check,
     implicit_imports: Option<Vec<(&str, Vec<&str>)>>,
 ) {
+    let config = AnalysisConfig::default();
     let sources = TestSources::new(&modules);
-    let sys_info = SysInfo::lg_default();
-    let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
+    let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
 
     let safety_map = match check {
         Check::Errors => {
@@ -243,7 +242,7 @@ fn check_output(
                 &sources,
                 &exports,
                 &import_graph,
-                &sys_info,
+                &config,
                 project::CachingMode::Disabled,
             )
             .safety_map
@@ -251,7 +250,7 @@ fn check_output(
         _ => SafetyMap::new(),
     };
     let effect_map = match check {
-        Check::Effects => project::analyze_all(&sources, &exports, &import_graph, &sys_info).0,
+        Check::Effects => project::analyze_all(&sources, &exports, &import_graph, &config).0,
         _ => HashMap::<_, _, ahash::RandomState>::default(),
     };
 
@@ -422,11 +421,11 @@ pub fn check_imports(
 /// Run analysis on a parsed module.
 pub fn run_module_analysis(code: &str, parsed_module: &ParsedModule) -> ModuleEffects {
     let exports = Exports::empty();
-    let sys_info = SysInfo::lg_default();
+    let config = AnalysisConfig::default();
     let sources = TestSources::new(&[(parsed_module.name.as_str(), code)]);
-    let import_graph = ImportGraph::make(&sources, &sys_info);
+    let import_graph = ImportGraph::make(&sources, &config);
     let stubs = sources.stubs();
-    analyze(parsed_module, &exports, &import_graph, stubs, &sys_info).module_effects
+    analyze(parsed_module, &exports, &import_graph, stubs, &config).module_effects
 }
 
 pub fn module_names(names: Vec<&str>) -> Vec<ModuleName> {
@@ -456,9 +455,9 @@ where
 /// Input is a vector of (module_name, code) pairs.
 pub fn analyze_tree(modules: &Vec<(&str, &str)>) -> AnalysisMap {
     let sources = TestSources::new(modules);
-    let sys_info = SysInfo::lg_default();
-    let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &sys_info);
-    project::analyze_all(&sources, &exports, &import_graph, &sys_info).0
+    let config = AnalysisConfig::default();
+    let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
+    project::analyze_all(&sources, &exports, &import_graph, &config).0
 }
 
 pub fn check_buck_availability() -> bool {

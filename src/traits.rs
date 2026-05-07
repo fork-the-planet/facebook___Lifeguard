@@ -25,6 +25,7 @@ use ruff_python_ast::name::Name;
 use ruff_python_parser::ParseError;
 use ruff_text_size::TextSize;
 
+use crate::config::AnalysisConfig;
 use crate::pyrefly::definitions::Definition;
 use crate::pyrefly::definitions::DefinitionStyle;
 use crate::pyrefly::definitions::Definitions;
@@ -45,7 +46,6 @@ impl AstExt for Ast {
 }
 
 pub trait SysInfoExt {
-    // Default configuration for lifeguard, since SysInfo::default() is pyrefly-specific.
     fn lg_default() -> Self;
 }
 
@@ -86,12 +86,12 @@ impl DefinitionExt for Definition {
 }
 
 pub trait DefinitionsExt {
-    fn make(x: &[Stmt], module_name: ModuleName, is_init: bool, sys_info: &SysInfo) -> Self;
+    fn make(x: &[Stmt], module_name: ModuleName, is_init: bool, config: &AnalysisConfig) -> Self;
 }
 
 impl DefinitionsExt for Definitions {
-    fn make(x: &[Stmt], module_name: ModuleName, is_init: bool, sys_info: &SysInfo) -> Self {
-        Self::new(x, module_name, is_init, false /* is_stub */, sys_info)
+    fn make(x: &[Stmt], module_name: ModuleName, is_init: bool, config: &AnalysisConfig) -> Self {
+        Self::new(x, module_name, is_init, false /* is_stub */, config)
     }
 }
 
@@ -249,21 +249,21 @@ mod tests {
     use starlark_map::small_set::SmallSet;
 
     use super::*;
+    use crate::config::AnalysisConfig;
     use crate::pyrefly::definitions::Definitions;
-    use crate::pyrefly::sys_info::SysInfo;
-    use crate::traits::SysInfoExt;
 
     fn calculate_definitions(
         contents: &str,
         module_name: ModuleName,
         is_init: bool,
     ) -> Definitions {
+        let config = AnalysisConfig::default();
         Definitions::new(
             &Ast::parse_py(contents).0.body,
             module_name,
             is_init,
             false, /* is_stub */
-            &SysInfo::lg_default(),
+            &config,
         )
     }
 

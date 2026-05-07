@@ -581,17 +581,17 @@ mod tests {
     }
 
     fn build_cache(sources: &crate::test_lib::TestSources) -> LibraryCache {
+        use crate::config::AnalysisConfig;
         use crate::imports::ImportGraph;
         use crate::project;
-        use crate::traits::SysInfoExt;
 
-        let sys_info = crate::pyrefly::sys_info::SysInfo::lg_default();
-        let (import_graph, exports) = ImportGraph::make_with_exports(sources, &sys_info);
+        let config = AnalysisConfig::default();
+        let (import_graph, exports) = ImportGraph::make_with_exports(sources, &config);
         let output = project::run_analysis(
             sources,
             &exports,
             &import_graph,
-            &sys_info,
+            &config,
             project::CachingMode::Enabled,
         );
         LibraryCache::build(

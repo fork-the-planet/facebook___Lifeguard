@@ -19,6 +19,7 @@ use tracing::trace;
 
 use crate::analyzer::AnalyzedModule;
 use crate::analyzer::Analyzer;
+use crate::config::AnalysisConfig;
 use crate::cursor::Cursor;
 use crate::effects::Effect;
 use crate::effects::EffectKind;
@@ -28,11 +29,9 @@ use crate::module_effects::ModuleEffects;
 use crate::module_info::ModuleInfo;
 use crate::module_parser::ParsedModule;
 use crate::module_parser::parse_pyi;
-use crate::pyrefly::sys_info::SysInfo;
 use crate::stubs::Stubs;
 use crate::traits::ExprExt;
 use crate::traits::ModuleNameExt;
-use crate::traits::SysInfoExt;
 
 /// Main entry point for the stub analyzer.
 pub fn analyze(
@@ -40,10 +39,10 @@ pub fn analyze(
     exports: &Exports,
     import_graph: &ImportGraph,
     stubs: &Stubs,
-    sys_info: &SysInfo,
+    config: &AnalysisConfig,
 ) -> AnalyzedModule {
     trace!("Checking module {}", parsed_module.name.as_str());
-    let reader = StubAnalyzer::new(parsed_module, exports, import_graph, stubs, sys_info);
+    let reader = StubAnalyzer::new(parsed_module, exports, import_graph, stubs, config);
     reader.analyze()
 }
 
@@ -53,8 +52,8 @@ pub fn analyze_str(mod_name: ModuleName, body: &str, stubs: &Stubs) -> AnalyzedM
     let parsed_module = parse_pyi(body, mod_name, false);
     let import_graph = ImportGraph::new();
     let exports = Exports::empty();
-    let sys_info = SysInfo::lg_default();
-    analyze(&parsed_module, &exports, &import_graph, stubs, &sys_info)
+    let config = AnalysisConfig::default();
+    analyze(&parsed_module, &exports, &import_graph, stubs, &config)
 }
 
 /// Implementation of Analyzer for stub files (.pyi).
@@ -124,7 +123,7 @@ impl<'a> StubAnalyzer<'a> {
     }
 
     fn if_(&mut self, x: &StmtIf, output: &mut ModuleEffects) {
-        for (_, body) in self.info.sys_info.pruned_if_branches(x) {
+        for (_, body) in self.info.config.sys_info.pruned_if_branches(x) {
             self.stmts(body, output);
         }
     }
@@ -173,9 +172,9 @@ impl<'a> Analyzer<'a> for StubAnalyzer<'a> {
         exports: &'a Exports,
         import_graph: &'a ImportGraph,
         stubs: &'a Stubs,
-        sys_info: &'a SysInfo,
+        config: &'a AnalysisConfig,
     ) -> Self {
-        let info = ModuleInfo::new(parsed_module, exports, import_graph, stubs, sys_info);
+        let info = ModuleInfo::new(parsed_module, exports, import_graph, stubs, config);
         Self {
             info,
             parsed_module,

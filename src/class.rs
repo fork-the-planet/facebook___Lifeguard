@@ -109,16 +109,15 @@ impl ClassTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AnalysisConfig;
     use crate::module_info::build_definitions_and_classes;
     use crate::module_parser::parse_source;
-    use crate::pyrefly::sys_info::SysInfo;
-    use crate::traits::SysInfoExt;
 
     pub fn make_class_table(code: &str) -> ClassTable {
         let mod_name = ModuleName::from_str("test");
         let parsed_module = parse_source(code, mod_name, false);
-        let sys_info = SysInfo::lg_default();
-        let (_definitions, classes) = build_definitions_and_classes(&parsed_module, &sys_info);
+        let config = AnalysisConfig::default();
+        let (_definitions, classes) = build_definitions_and_classes(&parsed_module, &config);
         classes
     }
 

@@ -22,6 +22,7 @@ use ruff_text_size::TextRange;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::config::AnalysisConfig;
 use crate::imports::ImportGraph;
 use crate::module_parser::ParsedModule;
 use crate::pyrefly::definitions::Definition;
@@ -311,12 +312,13 @@ impl<'a> ExportsBuilder<'a> {
     }
 
     pub fn build(mut self, parsed_module: &ParsedModule) -> Exports {
+        let config = AnalysisConfig::new(*self.sys_info);
         let definitions = Definitions::new(
             &parsed_module.ast.body,
             self.module_name,
             parsed_module.is_init,
             parsed_module.is_stub(),
-            self.sys_info,
+            &config,
         );
 
         for (name, def) in definitions.definitions.iter() {
