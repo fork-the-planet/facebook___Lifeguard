@@ -314,4 +314,25 @@ if __name__ == '__main__':
 "#;
         check_effects_not_main(code);
     }
+
+    #[test]
+    fn test_no_main_module_guard_pruned_everywhere() {
+        let code = r#"
+from foo import f
+if __name__ == '__main__':
+    f()
+"#;
+        check_effects_no_main(code);
+    }
+
+    #[test]
+    fn test_no_main_module_other_code_still_analyzed() {
+        let code = r#"
+from foo import f
+f()  # E: imported-function-call
+if __name__ == '__main__':
+    f()
+"#;
+        check_effects_no_main(code);
+    }
 }

@@ -35,6 +35,15 @@ fn is_name_main_guard(expr: &Expr) -> bool {
 #[derive(Debug, Clone)]
 pub struct AnalysisConfig {
     pub sys_info: SysInfo,
+    /// Which module is run as `__main__`, if known.
+    /// - `None`: caller did not specify; `__main__` guards are treated as live.
+    /// - `Some(M)` where M matches the current module: the body of
+    ///   `if __name__ == "__main__"` is analyzed; in all other modules, those
+    ///   bodies are pruned.
+    /// - `Some("")`: sentinel for "no module runs as `__main__`" — every
+    ///   `__main__` guard body is pruned everywhere. Used for python_binary
+    ///   targets built with `main_function = ...`, where the entry file is
+    ///   imported as a regular module and its `__main__` block is dead code.
     pub main_module: Option<ModuleName>,
 }
 

@@ -350,6 +350,14 @@ pub fn check_effects_not_main(code: &str) {
     check_output_with_config(vec![("test", code)], Check::Effects, None, config);
 }
 
+pub fn check_effects_no_main(code: &str) {
+    let config = AnalysisConfig {
+        main_module: Some(ModuleName::from_str("")),
+        ..AnalysisConfig::default()
+    };
+    check_output_with_config(vec![("test", code)], Check::Effects, None, config);
+}
+
 pub fn check_all_effects(modules: Vec<(&str, &str)>) {
     check_output(modules, Check::Effects, None);
 }
