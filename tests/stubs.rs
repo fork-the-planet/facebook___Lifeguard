@@ -140,4 +140,24 @@ Set.register(MyContainer)
             "source-overriding stub should remain in the safety map"
         );
     }
+
+    #[test]
+    fn test_pydantic_stub_class_body_calls_safe() {
+        // Regression test for the bundled pydantic/__init__.pyi stub.
+        // Pydantic's runtime __init__.py exposes Field/ConfigDict/field_serializer
+        // through PEP 562 __getattr__ which lifeguard cannot follow; without the
+        // stub these calls inside class bodies are flagged unknown-*-call.
+        let code = r#"
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
+
+class M(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    x: int = Field(default=0)
+
+    @field_serializer("x")
+    def _ser(self, v):
+        return v
+"#;
+        check(code);
+    }
 }
