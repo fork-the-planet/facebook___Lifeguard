@@ -84,7 +84,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         main_module: args.main_module.map(|s| ModuleName::from_str(&s)),
     };
 
-    let lifeguard_output = process_source_map(&src_map, &root_dir, &options)?;
+    let lifeguard_output = process_source_map(src_map, &root_dir, &options)?;
 
     if let Some(buck_target) = args.buck_target {
         println!("--- Lifeguard Analysis for {} ---", buck_target);

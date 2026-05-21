@@ -45,7 +45,7 @@ pub struct PipelineResult {
 /// Run the analysis pipeline up to (but not including) final output generation.
 /// Returns intermediate results that can be consumed by different output formats.
 pub fn run_pipeline(
-    src_map: &SourceMap,
+    src_map: SourceMap,
     root_dir: &std::path::Path,
     caching: CachingMode,
     main_module: Option<ModuleName>,
@@ -88,7 +88,7 @@ pub fn run_pipeline(
 
 /// Process a source map and run the full analysis pipeline.
 pub fn process_source_map(
-    src_map: &SourceMap,
+    src_map: SourceMap,
     root_dir: &std::path::Path,
     options: &Options,
 ) -> Result<LifeGuardAnalysis> {

@@ -212,25 +212,27 @@ fn source_priority(path: &Path) -> anyhow::Result<u8> {
 
 /// Build a lightweight SourceInfoMap from the SourceMap and Stubs.
 /// Contains only metadata (name, source_type, is_init, path) — no parsed ASTs.
+/// Consumes the SourceMap so PathBufs can be moved out instead of cloned.
 fn make_source_info_map(
-    source_map: &SourceMap,
+    source_map: SourceMap,
     stubs: &Stubs,
 ) -> (SourceInfoMap, AHashSet<ModuleName>) {
-    let mut info_map = SourceInfoMap::default();
+    let mut info_map =
+        SourceInfoMap::with_capacity_and_hasher(source_map.len(), ahash::RandomState::default());
     let mut overridden = AHashSet::new();
 
-    // Add entries from the source map (real .py files)
+    // Add entries from the source map (real .py files). Move PathBufs out — the
+    // caller no longer needs the SourceMap after this call.
     for (name, source_result) in source_map {
-        if let Some(path) = source_result.as_path() {
+        if let SourceResult::Ok(path) = source_result {
             let is_init = path.file_name().is_some_and(|f| f == "__init__.py");
-            let source_type = PySourceType::Python;
             info_map.insert(
-                *name,
+                name,
                 SourceInfo {
-                    name: *name,
-                    source_type,
+                    name,
+                    source_type: PySourceType::Python,
                     is_init,
-                    path: Some(path.clone()),
+                    path: Some(path),
                 },
             );
         }
@@ -305,7 +307,7 @@ pub struct Sources {
 }
 
 impl Sources {
-    pub fn new(source_map: &SourceMap, root_dir: PathBuf) -> Self {
+    pub fn new(source_map: SourceMap, root_dir: PathBuf) -> Self {
         let stubs = Stubs::new();
         let (info_map, stub_overrides) = time("Building source info map", || {
             make_source_info_map(source_map, &stubs)

@@ -65,7 +65,7 @@ pub fn run(args: RunTreeArgs) -> Result<()> {
         main_module: args.main_module.map(|s| ModuleName::from_str(&s)),
     };
 
-    let lifeguard_output = process_source_map(&source_map, &cwd, &options)?;
+    let lifeguard_output = process_source_map(source_map, &cwd, &options)?;
 
     println!(
         "--- Lifeguard Analysis for {} ---",
