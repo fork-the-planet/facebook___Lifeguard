@@ -63,6 +63,15 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     // Pysa marker decorator: wraps with a trivial pass-through via functools.wraps.
     // No registration, no global state, purely for static taint analysis.
     "confucius.analects.base.agentic_function.agent_function",
+    // Pure functools.wraps wrapper that shields an async task. All asyncio work
+    // (copy_context, create_task, shield) happens at call time, not decoration.
+    "langchain_core.callbacks.manager.shielded",
+    // Decorator factory that validates args and returns a closure. For FieldInfo
+    // objects it just copies the field with an updated docstring. No warnings
+    // emitted at decoration time — only at access/call time for properties/functions.
+    "langchain_core._api.deprecation.deprecated",
+    // Pydantic beta/deprecation markers — same pattern as deprecated above.
+    "langchain_core._api.beta_decorator.beta",
     // langchain_core.prompts uses PEP 562 __getattr__ for lazy re-exports. The
     // source exists in the DB but the analyzer can't follow the dynamic dispatch.
     // All are pure data constructors building template objects from strings.
