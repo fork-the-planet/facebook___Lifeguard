@@ -241,9 +241,9 @@ impl LibraryCache {
                 AHashSet::with_capacity(module.missing_imports.len());
 
             for missing in module.missing_imports.drain() {
-                if module_names.contains(&missing) {
-                    module.imports.insert(missing);
-                    resolved_modules.insert(missing);
+                if let Some(resolved) = resolve_to_known_module(&missing, &module_names) {
+                    module.imports.insert(resolved);
+                    resolved_modules.insert(resolved);
                 } else {
                     still_missing.insert(missing);
                 }
