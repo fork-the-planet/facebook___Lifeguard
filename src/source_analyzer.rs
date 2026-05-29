@@ -987,7 +987,7 @@ impl<'a> SourceAnalyzer<'a> {
         }
     }
 
-    fn check_decorators(&self, decs: &Vec<Decorator>, output: &mut ModuleEffects) {
+    fn check_decorators(&self, decs: &[Decorator], output: &mut ModuleEffects) {
         // Treat a decorator as a call. If the decorator does not have explicit call syntax,
         // treat it as a call with no arguments.
         for dec in decs {

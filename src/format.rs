@@ -131,7 +131,7 @@ pub fn format_expr(expr: &Expr) -> String {
         Expr::DictComp(x) => {
             format!(
                 "{{{}: {} {}}}",
-                format_expr(&x.key),
+                x.key.as_deref().map(format_expr).unwrap_or_default(),
                 format_expr(&x.value),
                 format_comprehensions(&x.generators)
             )
