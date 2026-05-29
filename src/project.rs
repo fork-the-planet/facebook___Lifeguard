@@ -296,6 +296,17 @@ impl GlobalAnalysisState {
         self.function_safety.insert(*func, FunctionSafety::Unsafe);
     }
 
+    fn mark_unsafe_missing_dep(&self, func: &ModuleName) {
+        self.function_safety
+            .insert(*func, FunctionSafety::UnsafeMissingDep);
+    }
+
+    fn is_unsafe(&self, func: &ModuleName) -> bool {
+        self.function_safety
+            .get(func)
+            .is_some_and(|v| *v == FunctionSafety::Unsafe)
+    }
+
     fn mark_unsafe_if_imported(&self, func: &ModuleName) {
         self.function_safety
             .insert(*func, FunctionSafety::UnsafeIfImported);
@@ -952,6 +963,9 @@ impl ProjectInfo {
                     tracing::warn!("precompute_function_safety: {}: {}", func_name.as_str(), e);
                     state.mark_unsafe(func_name);
                 }
+                if !state.function_safety.contains_key(func_name) {
+                    state.mark_safe(func_name);
+                }
             });
     }
 
@@ -1040,6 +1054,24 @@ impl ProjectInfo {
 
     fn can_resolve_call(&self, call: &Call, state: &GlobalAnalysisState) -> bool {
         self.contains_callable(&call.func) || state.function_safety.contains_key(&call.func)
+    }
+
+    /// Mark `func` unsafe because one of its callees failed its safety check.
+    /// A resolvable callee is intrinsically unsafe, so `func` is hard `Unsafe`.
+    /// An unresolvable callee may just be a missing cross-library dep, so `func`
+    /// gets the recoverable `UnsafeMissingDep` (which cross-library resolution
+    /// can later upgrade) — but never downgrade an already hard-`Unsafe` verdict.
+    fn mark_caller_unsafe_for_failed_callee(
+        &self,
+        func: &ModuleName,
+        callee: &Call,
+        state: &GlobalAnalysisState,
+    ) {
+        if self.can_resolve_call(callee, state) {
+            state.mark_unsafe(func);
+        } else if !state.is_unsafe(func) {
+            state.mark_unsafe_missing_dep(func);
+        }
     }
 
     fn check_unknown_call(&self, call: &Call) -> Result<SafetyError> {
@@ -1190,7 +1222,7 @@ impl ProjectInfo {
         if let Some(safe) = state.function_safety.get(&func).map(|r| *r) {
             let ret = match safe {
                 FunctionSafety::Safe => true,
-                FunctionSafety::Unsafe => false,
+                FunctionSafety::Unsafe | FunctionSafety::UnsafeMissingDep => false,
                 FunctionSafety::UnsafeIfImported => !is_cross_module_call,
             };
             return Ok(ret);
@@ -1220,10 +1252,7 @@ impl ProjectInfo {
                             is_module_scope: call.is_module_scope,
                         };
                         if !self.check_call_safety(&mut child_call, state, false)? {
-                            // This function has called an unsafe function; mark it unsafe.
-                            state.mark_unsafe(&func);
-                            // Do not return at the first error because we might miss some transitive
-                            // calls.
+                            self.mark_caller_unsafe_for_failed_callee(&func, &child_call, state);
                             ret = false;
                         }
                         call.stack = child_call.stack;
@@ -1246,7 +1275,7 @@ impl ProjectInfo {
                             let is_already_unsafe = state
                                 .function_safety
                                 .get(&func)
-                                .is_some_and(|v| *v == FunctionSafety::Unsafe);
+                                .is_some_and(|v| *v >= FunctionSafety::UnsafeMissingDep);
                             if !is_already_unsafe {
                                 state.mark_unsafe_if_imported(&func);
                                 if is_cross_module_call {

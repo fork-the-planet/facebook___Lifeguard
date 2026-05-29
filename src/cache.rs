@@ -45,6 +45,9 @@ pub struct CachedModule {
     pub imports: AHashSet<ModuleName>,
     /// Imports that could not be resolved to modules in the source DB.
     pub missing_imports: AHashSet<ModuleName>,
+    /// `from X import Y` where X is in the library but X.Y is not.
+    /// May be a submodule in another library or an attribute of X.
+    pub ambiguous_imports: AHashSet<ModuleName>,
     /// Module-level imports never accessed in any scope (side-effect imports).
     pub side_effect_imports: AHashSet<ModuleName>,
     /// Per-function safety verdicts from call graph analysis.
@@ -126,6 +129,11 @@ impl LibraryCache {
                     .map(|m| m.iter().cloned().collect())
                     .unwrap_or_default();
 
+                let ambiguous_imports: AHashSet<ModuleName> = import_graph
+                    .get_ambiguous_imports(&name)
+                    .map(|m| m.iter().cloned().collect())
+                    .unwrap_or_default();
+
                 let se_imports: AHashSet<ModuleName> = side_effect_imports
                     .get(&name)
                     .map(|s| s.iter().cloned().collect())
@@ -143,6 +151,7 @@ impl LibraryCache {
                     safety,
                     imports,
                     missing_imports,
+                    ambiguous_imports,
                     side_effect_imports: se_imports,
                     function_safety,
                 }
@@ -220,6 +229,19 @@ impl LibraryCache {
     pub fn resolve_cross_library_errors(&mut self) {
         let module_names: AHashSet<ModuleName> = self.modules.iter().map(|m| m.name).collect();
 
+        // Resolve ambiguous imports: `from X import Y` where X was in the
+        // library but X.Y was not. If X.Y exists in the merged cache, it's
+        // a submodule — add it as a real import edge.
+        for module in &mut self.modules {
+            for ambiguous in module.ambiguous_imports.drain() {
+                if let Some(resolved) = resolve_to_known_module(&ambiguous, &module_names) {
+                    module.imports.insert(resolved);
+                }
+            }
+        }
+
+        self.propagate_re_export_safety();
+
         let mut func_safety_by_module: HashMap<ModuleName, HashMap<String, FunctionSafety>> = self
             .modules
             .iter_mut()
@@ -262,9 +284,101 @@ impl LibraryCache {
             }
         }
 
+        // Iterative resolution: when a module becomes error-free, upgrade its
+        // UnsafeMissingDep functions to Safe and re-check other modules.
+        loop {
+            let mut upgraded = false;
+            for module in &self.modules {
+                if !matches!(&module.safety, CachedSafety::Ok(s) if s.is_safe()) {
+                    continue;
+                }
+                if let Some(fs) = func_safety_by_module.get_mut(&module.name) {
+                    for verdict in fs.values_mut() {
+                        if *verdict == FunctionSafety::UnsafeMissingDep {
+                            *verdict = FunctionSafety::Safe;
+                            upgraded = true;
+                        }
+                    }
+                }
+            }
+
+            if !upgraded {
+                break;
+            }
+
+            let mut cleared = false;
+            for module in &mut self.modules {
+                if let CachedSafety::Ok(ref mut safety) = module.safety {
+                    let before = safety.errors.len();
+                    safety.errors.retain(|e| {
+                        if !e.kind.could_be_caused_by_missing_import() {
+                            return true;
+                        }
+                        let func_name = e.metadata.trim_end_matches("()");
+                        !is_call_verified_safe(func_name, &module_names, &func_safety_by_module)
+                    });
+                    if safety.errors.len() < before {
+                        cleared = true;
+                    }
+                }
+            }
+
+            if !cleared {
+                break;
+            }
+        }
+
         for module in &mut self.modules {
             if let Some(fs) = func_safety_by_module.remove(&module.name) {
                 module.function_safety = fs;
+            }
+        }
+    }
+
+    /// Propagate function_safety entries through re-exports.
+    /// If module B re-exports `foo` from module C, and C has
+    /// function_safety["foo"] = Safe, then B should also get that entry.
+    fn propagate_re_export_safety(&mut self) {
+        let module_index: HashMap<ModuleName, usize> = self
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.name, i))
+            .collect();
+
+        loop {
+            let mut changed = false;
+            for re in &self.exports.re_exports {
+                let source_safety = module_index.get(&re.imported_module).and_then(|&idx| {
+                    self.modules[idx]
+                        .function_safety
+                        .get(&re.imported_attr)
+                        .copied()
+                });
+
+                if let Some(safety) = source_safety {
+                    if let Some(&idx) = module_index.get(&re.exported_module) {
+                        match self.modules[idx]
+                            .function_safety
+                            .entry(re.exported_attr.clone())
+                        {
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                e.insert(safety);
+                                changed = true;
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut e)
+                                if safety < *e.get() =>
+                            {
+                                e.insert(safety);
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
             }
         }
     }
@@ -331,20 +445,11 @@ fn is_call_verified_safe(
         }
     }
 
-    matches!(
-        resolved_modules
-            .iter()
-            .filter_map(|r| func_safety_by_module.get(r))
-            .filter_map(|fs| fs.get(func_name))
-            .try_fold(false, |_, s| {
-                if *s == FunctionSafety::Safe {
-                    Ok(true)
-                } else {
-                    Err(())
-                }
-            }),
-        Ok(true)
-    )
+    resolved_modules
+        .iter()
+        .filter_map(|r| func_safety_by_module.get(r))
+        .filter_map(|fs| fs.get(func_name))
+        .any(|s| *s == FunctionSafety::Safe)
 }
 
 fn resolve_to_known_module(name: &ModuleName, known: &AHashSet<ModuleName>) -> Option<ModuleName> {
@@ -377,6 +482,7 @@ impl CachedModule {
             safety: CachedSafety::Ok(CachedModuleSafety::default()),
             imports: AHashSet::new(),
             missing_imports: AHashSet::new(),
+            ambiguous_imports: AHashSet::new(),
             side_effect_imports: AHashSet::new(),
             function_safety: HashMap::new(),
         }
@@ -391,6 +497,7 @@ impl CachedModule {
         self.imports.extend(other.imports);
         self.missing_imports
             .retain(|m| other.missing_imports.contains(m));
+        self.ambiguous_imports.extend(other.ambiguous_imports);
         self.side_effect_imports.extend(other.side_effect_imports);
         self.safety.merge(other.safety);
         for (name, safety) in other.function_safety {
@@ -606,7 +713,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn test_cached_struct_sizes() {
         assert_eq!(std::mem::size_of::<LibraryCache>(), 120);
-        assert_eq!(std::mem::size_of::<CachedModule>(), 320);
+        assert_eq!(std::mem::size_of::<CachedModule>(), 384);
         assert_eq!(std::mem::size_of::<CachedSafety>(), 72);
         assert_eq!(std::mem::size_of::<CachedModuleSafety>(), 72);
         assert_eq!(std::mem::size_of::<CachedError>(), 32);
@@ -1141,6 +1248,49 @@ mod tests {
             mod_a.function_safety.contains_key("unused"),
             "unused should have a function_safety entry, got keys: {:?}",
             mod_a.function_safety.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_propagate_re_export_replaces_conservative_verdict() {
+        let mut cache = LibraryCache::empty();
+
+        // Module C defines `foo` as Safe
+        cache.modules.push(CachedModule {
+            name: mn("c"),
+            safety: CachedSafety::Ok(CachedModuleSafety::default()),
+            imports: AHashSet::new(),
+            missing_imports: AHashSet::new(),
+            ambiguous_imports: AHashSet::new(),
+            side_effect_imports: AHashSet::new(),
+            function_safety: HashMap::from([("foo".to_string(), FunctionSafety::Safe)]),
+        });
+
+        // Module B re-exports `foo` from C, but already has it as UnsafeMissingDep
+        cache.modules.push(CachedModule {
+            name: mn("b"),
+            safety: CachedSafety::Ok(CachedModuleSafety::default()),
+            imports: AHashSet::new(),
+            missing_imports: AHashSet::new(),
+            ambiguous_imports: AHashSet::new(),
+            side_effect_imports: AHashSet::new(),
+            function_safety: HashMap::from([("foo".to_string(), FunctionSafety::UnsafeMissingDep)]),
+        });
+
+        cache.exports.re_exports.push(CachedReExport {
+            exported_module: mn("b"),
+            exported_attr: "foo".to_string(),
+            imported_module: mn("c"),
+            imported_attr: "foo".to_string(),
+        });
+
+        cache.propagate_re_export_safety();
+
+        let b = cache.modules.iter().find(|m| m.name == mn("b")).unwrap();
+        assert_eq!(
+            b.function_safety.get("foo"),
+            Some(&FunctionSafety::Safe),
+            "propagation should replace UnsafeMissingDep with Safe from source module"
         );
     }
 

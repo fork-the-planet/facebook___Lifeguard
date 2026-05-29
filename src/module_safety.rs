@@ -16,7 +16,8 @@ use crate::errors::SafetyError;
 
 /// Safety verdict for a single function from call graph analysis.
 ///
-/// Variants are ordered by conservatism: `Safe` < `UnsafeIfImported` < `Unsafe`.
+/// Variants are ordered by conservatism:
+/// `Safe` < `UnsafeIfImported` < `UnsafeMissingDep` < `Unsafe`.
 #[derive(
     Debug,
     Clone,
@@ -33,7 +34,10 @@ pub enum FunctionSafety {
     Safe,
     /// Safe within its own module, unsafe when called cross-module.
     UnsafeIfImported,
-    /// Always unsafe to call.
+    /// Unsafe only because a transitive call target could not be resolved
+    /// (missing dep). May be upgraded to Safe after cross-library resolution.
+    UnsafeMissingDep,
+    /// Always unsafe to call (intrinsic side effects).
     Unsafe,
 }
 

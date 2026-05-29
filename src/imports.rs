@@ -194,6 +194,7 @@ pub fn get_import_chain_string(
 pub struct ImportGraph {
     pub graph: Graph,
     missing: AHashMap<ModuleName, AHashSet<ModuleName>>,
+    ambiguous: AHashMap<ModuleName, AHashSet<ModuleName>>,
 }
 
 impl ImportGraph {
@@ -201,6 +202,7 @@ impl ImportGraph {
         Self {
             graph: Graph::new(),
             missing: AHashMap::new(),
+            ambiguous: AHashMap::new(),
         }
     }
 
@@ -242,6 +244,10 @@ impl ImportGraph {
         self.missing.entry(*from).or_default().insert(to);
     }
 
+    pub fn get_ambiguous_imports(&self, name: &ModuleName) -> Option<&AHashSet<ModuleName>> {
+        self.ambiguous.get(name)
+    }
+
     /// Check if a module has any imports to unidentified/missing modules.
     pub fn has_missing_import(&self, from: &ModuleName, module: &ModuleName) -> bool {
         self.missing
@@ -276,6 +282,7 @@ struct ModuleImportCollector<'a> {
     graph: &'a Graph,
     config: &'a AnalysisConfig,
     imports: Imports,
+    ambiguous_imports: Imports,
     has_importlib: bool,
     has_import_module: bool,
 }
@@ -293,14 +300,15 @@ impl<'a> ModuleImportCollector<'a> {
             graph,
             config,
             imports: Imports::new(),
+            ambiguous_imports: Imports::new(),
             has_importlib: false,
             has_import_module: false,
         }
     }
 
-    fn collect(mut self, ast: &ModModule) -> Imports {
+    fn collect(mut self, ast: &ModModule) -> (Imports, Imports) {
         self.stmts(&ast.body);
-        self.imports
+        (self.imports, self.ambiguous_imports)
     }
 
     fn if_(&mut self, s: &StmtIf) {
@@ -402,21 +410,27 @@ impl<'a> ModuleImportCollector<'a> {
             parent.append(name)
         };
 
-        // 1) If the graph contains the submodule `x.y` then we add
-        // an edge to represent the submodule that is registered in
-        // the ast map.
-        // 2) If the source code for module `x` is missing (not in graph),
-        // conservatively capture `x.y` as a submodule as we have
-        // no way of determining if `x.y` is an attribute or a submodule
         if self.graph.contains(&maybe_sub) || !self.graph.contains(&parent) {
             self.imports.insert(maybe_sub);
+        } else {
+            // Parent is in graph but child is not. Could be an attribute
+            // of the parent or a submodule defined in a different library.
+            // Record as ambiguous for cross-library resolution.
+            self.ambiguous_imports.insert(maybe_sub);
         }
     }
+}
+
+struct CollectedImports {
+    module: ModuleName,
+    imports: Imports,
+    ambiguous: Imports,
 }
 
 struct ImportGraphBuilder<'a> {
     graph: Graph,
     missing: AHashMap<ModuleName, AHashSet<ModuleName>>,
+    ambiguous: AHashMap<ModuleName, AHashSet<ModuleName>>,
     config: &'a AnalysisConfig,
 }
 
@@ -426,6 +440,7 @@ impl<'a> ImportGraphBuilder<'a> {
             // 4x edge estimate: dotted imports like `a.b.c` expand into multiple edges
             graph: Graph::with_capacity(node_count, node_count * 4),
             missing: AHashMap::new(),
+            ambiguous: AHashMap::new(),
             config,
         }
     }
@@ -442,20 +457,30 @@ impl<'a> ImportGraphBuilder<'a> {
         &self,
         name: ModuleName,
         ast_result: &AstResult,
-    ) -> Option<(ModuleName, Imports)> {
+    ) -> Option<CollectedImports> {
         let module = ast_result.as_parsed().ok()?;
         let collector = ModuleImportCollector::new(name, module.is_init, &self.graph, self.config);
-        let imports = collector.collect(&module.ast);
-        Some((name, imports))
+        let (imports, ambiguous) = collector.collect(&module.ast);
+        Some(CollectedImports {
+            module: name,
+            imports,
+            ambiguous,
+        })
     }
 
-    fn add_edges_and_finish(mut self, all_imports: Vec<(ModuleName, Imports)>) -> ImportGraph {
+    fn add_edges_and_finish(mut self, all_imports: Vec<CollectedImports>) -> ImportGraph {
         time("  Adding import edges to graph", || {
-            for (from, imports) in all_imports {
-                for to in imports {
-                    if !(self.graph.add_edge(&from, &to)) {
-                        self.missing.entry(from).or_default().insert(to);
+            for collected in all_imports {
+                for to in collected.imports {
+                    if !(self.graph.add_edge(&collected.module, &to)) {
+                        self.missing.entry(collected.module).or_default().insert(to);
                     }
+                }
+                if !collected.ambiguous.is_empty() {
+                    self.ambiguous
+                        .entry(collected.module)
+                        .or_default()
+                        .extend(collected.ambiguous);
                 }
             }
         });
@@ -463,13 +488,14 @@ impl<'a> ImportGraphBuilder<'a> {
         ImportGraph {
             graph: self.graph,
             missing: self.missing,
+            ambiguous: self.ambiguous,
         }
     }
 
     fn build(mut self, sources: &impl ModuleProvider) -> ImportGraph {
         self.add_nodes(sources.module_names_iter());
 
-        let results: Vec<Result<(ModuleName, Imports), ModuleName>> =
+        let results: Vec<Result<CollectedImports, ModuleName>> =
             time("  Collecting all import edges", || {
                 sources
                     .module_names_par_iter()
@@ -499,7 +525,7 @@ impl<'a> ImportGraphBuilder<'a> {
     fn build_with_exports(mut self, sources: &impl ModuleProvider) -> (ImportGraph, Exports) {
         self.add_nodes(sources.module_names_iter());
 
-        let results: Vec<Result<((ModuleName, Imports), Exports), ModuleName>> =
+        let results: Vec<Result<(CollectedImports, Exports), ModuleName>> =
             time("  Collecting imports and exports", || {
                 sources
                     .module_names_par_iter()
