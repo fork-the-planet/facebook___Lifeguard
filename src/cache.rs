@@ -20,6 +20,7 @@ use crate::errors::SafetyError;
 use crate::exports::ExportType;
 use crate::exports::Exports;
 use crate::imports::ImportGraph;
+use crate::imports::resolve_to_known_module;
 use crate::module_safety::FunctionSafety;
 use crate::module_safety::ModuleSafety;
 use crate::module_safety::SafetyResult;
@@ -219,26 +220,79 @@ impl LibraryCache {
         self.modules.truncate(write + 1);
     }
 
-    /// Resolve missing imports against the merged cache and selectively clear
-    /// false errors using per-function safety verdicts.
-    ///
-    /// Each missing import is resolved independently. For each Unknown* error,
-    /// we consult the resolved module's cached function_safety to determine
-    /// whether the called function is actually safe. Only errors where the
-    /// function is verified safe are cleared.
-    pub fn resolve_cross_library_errors(&mut self) {
-        let module_names: AHashSet<ModuleName> = self.modules.iter().map(|m| m.name).collect();
-
-        // Resolve ambiguous imports: `from X import Y` where X was in the
-        // library but X.Y was not. If X.Y exists in the merged cache, it's
-        // a submodule — add it as a real import edge.
+    /// Resolve ambiguous imports: `from X import Y` where X was in the library
+    /// but X.Y was not. If X.Y resolves to a module in the merged set, it's a
+    /// submodule — add it as a real import edge.
+    fn resolve_ambiguous_imports(&mut self, module_names: &AHashSet<ModuleName>) {
         for module in &mut self.modules {
             for ambiguous in module.ambiguous_imports.drain() {
-                if let Some(resolved) = resolve_to_known_module(&ambiguous, &module_names) {
+                if let Some(resolved) = resolve_to_known_module(&ambiguous, module_names) {
                     module.imports.insert(resolved);
                 }
             }
         }
+    }
+
+    /// Iteratively clear false errors: promoting one module's functions to
+    /// `Safe` can make a caller error-free, which in turn promotes its
+    /// functions. Repeat until a round promotes nothing or clears nothing.
+    fn upgrade_missing_dep_functions(
+        &mut self,
+        module_names: &AHashSet<ModuleName>,
+        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+    ) {
+        while self.promote_safe_module_functions(func_safety_by_module)
+            && self.clear_verified_errors(module_names, func_safety_by_module)
+        {}
+    }
+
+    /// Promote every `UnsafeMissingDep` verdict in an already-safe module to
+    /// `Safe`. Returns whether any verdict changed.
+    fn promote_safe_module_functions(
+        &self,
+        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+    ) -> bool {
+        let mut promoted = false;
+        for module in self
+            .modules
+            .iter()
+            .filter(|m| matches!(&m.safety, CachedSafety::Ok(s) if s.is_safe()))
+        {
+            let Some(fs) = func_safety_by_module.get_mut(&module.name) else {
+                continue;
+            };
+            for verdict in fs
+                .values_mut()
+                .filter(|v| **v == FunctionSafety::UnsafeMissingDep)
+            {
+                *verdict = FunctionSafety::Safe;
+                promoted = true;
+            }
+        }
+        promoted
+    }
+
+    /// Drop errors that the current per-function verdicts now verify as safe.
+    /// Returns whether any error was removed.
+    fn clear_verified_errors(
+        &mut self,
+        module_names: &AHashSet<ModuleName>,
+        func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+    ) -> bool {
+        let mut cleared = false;
+        for module in &mut self.modules {
+            if let CachedSafety::Ok(ref mut safety) = module.safety {
+                cleared |= retain_unverified_errors(safety, module_names, func_safety_by_module);
+            }
+        }
+        cleared
+    }
+
+    /// Resolve missing imports against the merged cache and selectively clear
+    /// false errors using per-function safety verdicts.
+    pub fn resolve_cross_library_errors(&mut self) {
+        let module_names: AHashSet<ModuleName> = self.modules.iter().map(|m| m.name).collect();
+        self.resolve_ambiguous_imports(&module_names);
 
         self.propagate_re_export_safety();
 
@@ -274,59 +328,11 @@ impl LibraryCache {
             module.missing_imports = still_missing;
 
             if let CachedSafety::Ok(ref mut safety) = module.safety {
-                safety.errors.retain(|e| {
-                    if !e.kind.could_be_caused_by_missing_import() {
-                        return true;
-                    }
-                    let func_name = e.metadata.trim_end_matches("()");
-                    !is_call_verified_safe(func_name, &resolved_modules, &func_safety_by_module)
-                });
+                retain_unverified_errors(safety, &resolved_modules, &func_safety_by_module);
             }
         }
 
-        // Iterative resolution: when a module becomes error-free, upgrade its
-        // UnsafeMissingDep functions to Safe and re-check other modules.
-        loop {
-            let mut upgraded = false;
-            for module in &self.modules {
-                if !matches!(&module.safety, CachedSafety::Ok(s) if s.is_safe()) {
-                    continue;
-                }
-                if let Some(fs) = func_safety_by_module.get_mut(&module.name) {
-                    for verdict in fs.values_mut() {
-                        if *verdict == FunctionSafety::UnsafeMissingDep {
-                            *verdict = FunctionSafety::Safe;
-                            upgraded = true;
-                        }
-                    }
-                }
-            }
-
-            if !upgraded {
-                break;
-            }
-
-            let mut cleared = false;
-            for module in &mut self.modules {
-                if let CachedSafety::Ok(ref mut safety) = module.safety {
-                    let before = safety.errors.len();
-                    safety.errors.retain(|e| {
-                        if !e.kind.could_be_caused_by_missing_import() {
-                            return true;
-                        }
-                        let func_name = e.metadata.trim_end_matches("()");
-                        !is_call_verified_safe(func_name, &module_names, &func_safety_by_module)
-                    });
-                    if safety.errors.len() < before {
-                        cleared = true;
-                    }
-                }
-            }
-
-            if !cleared {
-                break;
-            }
-        }
+        self.upgrade_missing_dep_functions(&module_names, &mut func_safety_by_module);
 
         for module in &mut self.modules {
             if let Some(fs) = func_safety_by_module.remove(&module.name) {
@@ -421,6 +427,31 @@ impl LibraryCache {
     }
 }
 
+/// Drop errors on `safety` that the per-function verdicts verify as safe,
+/// considering only calls into `modules`. Returns whether any error was removed.
+fn retain_unverified_errors(
+    safety: &mut CachedModuleSafety,
+    modules: &AHashSet<ModuleName>,
+    func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafety>>,
+) -> bool {
+    let before = safety.errors.len();
+    safety.errors.retain(|e| {
+        if !e.kind.could_be_caused_by_missing_import() {
+            return true;
+        }
+        // `e.metadata` is the callee name recorded on the effect (see
+        // `SafetyError::new_from_effect`), which may render the call with a
+        // trailing `()`. `function_safety` is keyed by the bare function name,
+        // so strip the `()` before looking the verdict up.
+        !is_call_verified_safe(
+            e.metadata.trim_end_matches("()"),
+            modules,
+            func_safety_by_module,
+        )
+    });
+    safety.errors.len() < before
+}
+
 /// Check if a function call can be verified as safe using cached per-function
 /// safety verdicts from the resolved modules.
 ///
@@ -450,15 +481,6 @@ fn is_call_verified_safe(
         .filter_map(|r| func_safety_by_module.get(r))
         .filter_map(|fs| fs.get(func_name))
         .any(|s| *s == FunctionSafety::Safe)
-}
-
-fn resolve_to_known_module(name: &ModuleName, known: &AHashSet<ModuleName>) -> Option<ModuleName> {
-    if known.contains(name) {
-        return Some(*name);
-    }
-    name.iter_parents()
-        .find(|(p, _)| known.contains(p))
-        .map(|(p, _)| p)
 }
 
 fn resolve_implicit_imports(

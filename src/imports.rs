@@ -28,6 +28,7 @@ use crate::graph::Graph;
 use crate::source_map::AstResult;
 use crate::source_map::ModuleProvider;
 use crate::tracing::time;
+use crate::traits::ModuleNameExt;
 
 #[derive(Debug, Copy, Clone)]
 
@@ -254,6 +255,18 @@ impl ImportGraph {
             .get(from)
             .is_some_and(|mods| mods.contains(module))
     }
+}
+
+pub(crate) fn resolve_to_known_module(
+    name: &ModuleName,
+    known: &AHashSet<ModuleName>,
+) -> Option<ModuleName> {
+    if known.contains(name) {
+        return Some(*name);
+    }
+    name.iter_parents()
+        .find(|(p, _)| known.contains(p))
+        .map(|(p, _)| p)
 }
 
 type Imports = AHashSet<ModuleName>;

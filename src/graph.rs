@@ -74,6 +74,11 @@ impl Graph {
         self.nodes.par_iter()
     }
 
+    /// Get an iterator over all node names in the graph.
+    pub fn node_names(&self) -> impl Iterator<Item = &ModuleName> {
+        self.nodes.keys()
+    }
+
     /// Get an iterator over all the neighbors of a node.
     pub fn neighbors(&self, node: &ModuleName) -> impl Iterator<Item = &ModuleName> {
         self.find_edges(node, Direction::Outgoing)
