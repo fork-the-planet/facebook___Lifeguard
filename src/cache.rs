@@ -223,14 +223,21 @@ impl LibraryCache {
     /// Resolve ambiguous imports: `from X import Y` where X was in the library
     /// but X.Y was not. If X.Y resolves to a module in the merged set, it's a
     /// submodule — add it as a real import edge.
-    fn resolve_ambiguous_imports(&mut self, module_names: &AHashSet<ModuleName>) {
+    /// Returns a map of module → newly resolved targets for downstream error clearing.
+    fn resolve_ambiguous_imports(
+        &mut self,
+        module_names: &AHashSet<ModuleName>,
+    ) -> HashMap<ModuleName, AHashSet<ModuleName>> {
+        let mut resolved: HashMap<ModuleName, AHashSet<ModuleName>> = HashMap::new();
         for module in &mut self.modules {
             for ambiguous in module.ambiguous_imports.drain() {
-                if let Some(resolved) = resolve_to_known_module(&ambiguous, module_names) {
-                    module.imports.insert(resolved);
+                if let Some(target) = resolve_to_known_module(&ambiguous, module_names) {
+                    module.imports.insert(target);
+                    resolved.entry(module.name).or_default().insert(target);
                 }
             }
         }
+        resolved
     }
 
     /// Iteratively clear false errors: promoting one module's functions to
@@ -292,7 +299,7 @@ impl LibraryCache {
     /// false errors using per-function safety verdicts.
     pub fn resolve_cross_library_errors(&mut self) {
         let module_names: AHashSet<ModuleName> = self.modules.iter().map(|m| m.name).collect();
-        self.resolve_ambiguous_imports(&module_names);
+        let mut ambiguous_resolved = self.resolve_ambiguous_imports(&module_names);
 
         self.propagate_re_export_safety();
 
@@ -307,7 +314,9 @@ impl LibraryCache {
                 resolve_implicit_imports(&mut safety.implicit_imports, &module_names);
             }
 
-            if module.missing_imports.is_empty() {
+            let from_ambiguous = ambiguous_resolved.remove(&module.name);
+
+            if module.missing_imports.is_empty() && from_ambiguous.is_none() {
                 continue;
             }
 
@@ -315,6 +324,10 @@ impl LibraryCache {
                 AHashSet::with_capacity(module.missing_imports.len());
             let mut resolved_modules: AHashSet<ModuleName> =
                 AHashSet::with_capacity(module.missing_imports.len());
+
+            if let Some(from_ambiguous) = from_ambiguous {
+                resolved_modules.extend(from_ambiguous);
+            }
 
             for missing in module.missing_imports.drain() {
                 if let Some(resolved) = resolve_to_known_module(&missing, &module_names) {
@@ -1348,6 +1361,51 @@ mod tests {
         assert!(
             caller_after.is_safe(),
             "caller should be safe after resolving cross-library function call"
+        );
+    }
+
+    #[test]
+    fn test_error_cleared_from_ambiguous_import() {
+        use crate::test_lib::TestSources;
+
+        // dep library: pkg/__init__.py defines helper()
+        let dep_cache = build_cache(&TestSources::new(&[
+            ("pkg", ""),
+            ("pkg.sub", "def helper(): return 1\n"),
+        ]));
+
+        // caller library: 'from pkg import sub' is ambiguous (pkg in graph, pkg.sub not)
+        // then calls sub.helper() → produces an error since sub can't be resolved
+        let mut own_cache = build_cache(&TestSources::new(&[(
+            "caller",
+            "from pkg import sub\nx = sub.helper()\n",
+        )]));
+
+        let caller_before = own_cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("caller"))
+            .unwrap();
+        assert!(
+            !caller_before.is_safe(),
+            "caller should be unsafe before merge (pkg.sub is unresolved)"
+        );
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let caller = own_cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("caller"))
+            .unwrap();
+        assert!(
+            caller.imports.contains(&mn("pkg.sub")),
+            "ambiguous import pkg.sub should be resolved as a real import"
+        );
+        assert!(
+            caller.is_safe(),
+            "caller error should be cleared once the ambiguous import feeds into error clearing"
         );
     }
 }
