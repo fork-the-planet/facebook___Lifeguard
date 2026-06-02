@@ -52,6 +52,7 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     // Pure wrapper: reads __qualname__/__module__, creates an idempotent logger,
     // returns a functools.wraps closure. No I/O or state mutation at decoration time.
     "libfb.py.asyncio.decorators.retryable",
+    "libfb.py.asyncio.decorators.memoize_timed",
     // Constructs SpanScope storing name + deferred tracer lambda, wraps with
     // functools.wraps. Span is only started at call time. Explicitly designed
     // for module-level decoration before configure() is called.
@@ -105,6 +106,21 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     "dns.name.IDNA2003Codec",
     "dns.name.IDNA2008Codec",
     "dns.name.Name",
+    // Pure-wrapper deprecation decorators. At decoration time they only build a
+    // closure that emits a DeprecationWarning at call time; no module-level
+    // registry, no I/O. Same shape as langchain_core._api.deprecation.deprecated.
+    "markdown.util.deprecated",
+    "nltk.internals.deprecated",
+    "sympy.utilities.decorator.deprecated",
+    // sandcastle test gate: at decoration time it either returns the function
+    // unchanged or wraps it via functools.wraps. It mutates only the decorated
+    // function's own __unittest_skip__/__unittest_skip_why__ attributes, never
+    // module-level state.
+    "torch.testing._internal.common_utils.skip_but_pass_in_sandcastle_if",
+    // Docstring rewriter for the HuggingFace AutoConfig table. Reads from
+    // module-level CONFIG_MAPPING_NAMES/MODEL_NAMES_MAPPING constants (no mutation)
+    // and assigns to fn.__doc__ on the decorated function only.
+    "transformers.models.auto.configuration_auto.replace_list_option_in_docstrings",
 ];
 
 /// Copy of SAFE_FUNCTIONS_ARRAY as a global set for faster searching.
