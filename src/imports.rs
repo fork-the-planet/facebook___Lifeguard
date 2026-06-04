@@ -262,7 +262,8 @@ impl ImportGraph {
     }
 }
 
-pub(crate) fn resolve_to_known_module(
+#[doc(hidden)]
+pub fn resolve_to_known_module(
     name: &ModuleName,
     known: &AHashSet<ModuleName>,
 ) -> Option<ModuleName> {
