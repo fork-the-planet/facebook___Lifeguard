@@ -16,6 +16,9 @@ use tracing::warn;
 use crate::cache::LibraryCache;
 use crate::debug::report_peak_memory;
 use crate::project::CachingMode;
+use crate::runner::DEFAULT_PYTHON_VERSION;
+use crate::runner::Options;
+use crate::runner::parse_python_version;
 use crate::runner::run_pipeline;
 use crate::source_map;
 use crate::source_map::SourceMap;
@@ -35,6 +38,10 @@ pub struct AnalyzeLibraryArgs {
     /// Cross-library resolution is handled entirely in the reduce step (analyze-binary).
     #[arg(long = "dep-cache", hide = true)]
     pub dep_caches: Vec<PathBuf>,
+
+    /// Python version to use for parsing
+    #[arg(long = "python-version", default_value = DEFAULT_PYTHON_VERSION)]
+    pub python_version: String,
 }
 
 /// Detect the root directory by walking up from cwd until a source file resolves.
@@ -91,13 +98,22 @@ pub fn run(args: AnalyzeLibraryArgs) -> Result<()> {
         source_map::load_source_map(&args.db_path)
     })?;
 
+    let python_version = parse_python_version(&args.python_version)?;
+
+    let options = Options {
+        verbose_output_path: None,
+        sorted_output: false,
+        main_module: None,
+        python_version,
+    };
+
     let cache = if src_map.is_empty() {
         info!("Source map is empty, producing empty cache");
         LibraryCache::empty()
     } else {
         let root_dir = detect_root_dir(&src_map)?;
 
-        let result = run_pipeline(src_map, &root_dir, CachingMode::Enabled, None)?;
+        let result = run_pipeline(src_map, &root_dir, CachingMode::Enabled, &options)?;
 
         time("Building cache", || {
             LibraryCache::build(

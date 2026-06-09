@@ -18,7 +18,9 @@ use tracing::info;
 use crate::cache::LibraryCache;
 use crate::debug::report_peak_memory;
 use crate::output::LifeGuardAnalysis;
+use crate::runner::DEFAULT_PYTHON_VERSION;
 use crate::runner::Options;
+use crate::runner::parse_python_version;
 use crate::tracing::ProcessTimer;
 use crate::tracing::time;
 
@@ -38,6 +40,10 @@ pub struct AnalyzeBinaryArgs {
     /// Name of the main module (the module run as __main__)
     #[arg(long = "main-module")]
     pub main_module: Option<String>,
+
+    /// Python version to use for parsing
+    #[arg(long = "python-version", default_value = DEFAULT_PYTHON_VERSION)]
+    pub python_version: String,
 }
 
 pub fn run(args: AnalyzeBinaryArgs) -> Result<()> {
@@ -68,10 +74,13 @@ pub fn run(args: AnalyzeBinaryArgs) -> Result<()> {
 
     info!("Merged cache: {} modules", merged.modules.len());
 
+    let python_version = parse_python_version(&args.python_version)?;
+
     let options = Options {
         verbose_output_path: None,
         sorted_output: args.sorted_output,
         main_module: args.main_module.map(|s| ModuleName::from_str(&s)),
+        python_version,
     };
 
     let analysis = time("Building analysis from cache", || {

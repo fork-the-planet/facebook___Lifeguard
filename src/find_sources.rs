@@ -20,10 +20,12 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use ruff_python_ast::Stmt;
-use ruff_python_parser::parse_unchecked_source;
+use ruff_python_parser::ParseOptions;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
+use crate::pyrefly::sys_info::PythonVersion;
+use crate::runner::to_ruff_version;
 use crate::source_map::RawSourceMap;
 use crate::source_map::SourceMap;
 use crate::source_map::is_python_file;
@@ -121,11 +123,22 @@ fn resolve_relative_import(level: u32, module: Option<&str>, package: &str) -> O
 
 /// Extract dotted module names from import statements in Python source.
 /// If `package` is provided, relative imports are resolved against it.
-fn extract_imports(source: &str, package: Option<&str>) -> Vec<String> {
-    let parsed = parse_unchecked_source(source, ruff_python_ast::PySourceType::Python);
+fn extract_imports(
+    source: &str,
+    package: Option<&str>,
+    python_version: PythonVersion,
+) -> Vec<String> {
+    let ruff_version = to_ruff_version(&python_version);
+    let options =
+        ParseOptions::from(ruff_python_ast::PySourceType::Python).with_target_version(ruff_version);
+    let parsed = ruff_python_parser::parse_unchecked(source, options);
     let mut imports = Vec::new();
+    let module = match parsed.into_syntax() {
+        ruff_python_ast::Mod::Module(m) => m,
+        _ => return Vec::new(),
+    };
 
-    for stmt in parsed.suite() {
+    for stmt in module.body {
         match stmt {
             Stmt::Import(import) => {
                 for alias in &import.names {
@@ -209,6 +222,7 @@ fn load_site_packages(input_dir: &Path) -> Result<Option<PathBuf>> {
 pub fn build_source_db(
     input_dir: &Path,
     site_packages_override: Option<&Path>,
+    python_version: PythonVersion,
 ) -> Result<(BTreeMap<String, String>, usize)> {
     let input_dir = input_dir.canonicalize()?;
 
@@ -284,7 +298,7 @@ pub fn build_source_db(
             .as_ref()
             .and_then(|sp| file_path.strip_prefix(sp).ok())
             .and_then(package_from_rel_path);
-        let imports = extract_imports(&source, package.as_deref());
+        let imports = extract_imports(&source, package.as_deref(), python_version);
         for module_name in imports {
             if let Some(resolved) = resolve_import(&roots, &module_name) {
                 let resolved = match resolved.canonicalize() {

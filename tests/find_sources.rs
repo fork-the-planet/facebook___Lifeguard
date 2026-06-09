@@ -11,6 +11,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use lifeguard::find_sources::build_source_db;
+    use lifeguard::runner::default_python_version;
     use lifeguard::test_lib::populate_temp_dir;
 
     fn keys(build_map: &BTreeMap<String, String>) -> BTreeSet<&str> {
@@ -21,7 +22,8 @@ mod tests {
     fn test_seeds_py_files_from_input_dir() {
         let tmp = populate_temp_dir(&[("a.py", ""), ("pkg/__init__.py", ""), ("pkg/b.py", "")]);
 
-        let (build_map, seed_count) = build_source_db(tmp.path(), None).unwrap();
+        let (build_map, seed_count) =
+            build_source_db(tmp.path(), None, default_python_version()).unwrap();
         assert_eq!(seed_count, 3, "all three .py files are seeded");
         assert_eq!(
             keys(&build_map),
@@ -39,7 +41,7 @@ mod tests {
             ("2024-migration.py", ""),
         ]);
 
-        let (build_map, _) = build_source_db(tmp.path(), None).unwrap();
+        let (build_map, _) = build_source_db(tmp.path(), None, default_python_version()).unwrap();
         assert_eq!(keys(&build_map), BTreeSet::from(["good.py"]));
     }
 
@@ -55,7 +57,8 @@ mod tests {
         let proj = tmp.path().join("proj");
         let sp = tmp.path().join("sp");
 
-        let (build_map, seed_count) = build_source_db(&proj, Some(&sp)).unwrap();
+        let (build_map, seed_count) =
+            build_source_db(&proj, Some(&sp), default_python_version()).unwrap();
         assert_eq!(seed_count, 1, "only main.py is seeded from the project");
         assert_eq!(
             keys(&build_map),
@@ -76,7 +79,7 @@ mod tests {
         let proj = tmp.path().join("proj");
         let sp = tmp.path().join("sp");
 
-        let (build_map, _) = build_source_db(&proj, Some(&sp)).unwrap();
+        let (build_map, _) = build_source_db(&proj, Some(&sp), default_python_version()).unwrap();
         assert_eq!(
             keys(&build_map),
             BTreeSet::from(["main.py", "pkg/__init__.py", "pkg/helper.py"]),

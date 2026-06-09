@@ -37,7 +37,7 @@ use ruff_python_ast::StmtTry;
 use ruff_python_ast::StmtWhile;
 use ruff_python_ast::StmtWith;
 use ruff_python_ast::name::Name;
-use ruff_python_parser::parse_unchecked_source;
+use ruff_python_parser::ParseOptions;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use tracing::trace;
@@ -67,6 +67,7 @@ use crate::module_info::ResolvedName;
 use crate::module_info::get_import_module_state_from_def;
 use crate::module_parser::ParsedModule;
 use crate::pyrefly::definitions::DefinitionStyle;
+use crate::runner::to_ruff_version;
 use crate::stubs::Stubs;
 use crate::traits::DefinitionExt;
 use crate::traits::ExprExt;
@@ -195,8 +196,16 @@ impl<'a> SourceAnalyzer<'a> {
         if code.is_empty() {
             return;
         }
-        let parsed = parse_unchecked_source(code, PySourceType::Python);
-        let module = parsed.into_syntax();
+        let ruff_version = to_ruff_version(&self.info.config.sys_info.version());
+        let options = ParseOptions::from(PySourceType::Python).with_target_version(ruff_version);
+        let parsed = ruff_python_parser::parse_unchecked(code, options);
+        let module = match parsed.into_syntax() {
+            ruff_python_ast::Mod::Module(m) => m,
+            _ => {
+                self.add_effect(Effect::new(EffectKind::ExecCall, fname, range), output);
+                return;
+            }
+        };
         let Some(Stmt::Expr(expr_stmt)) = module.body.first() else {
             self.add_effect(Effect::new(EffectKind::ExecCall, fname, range), output);
             return;

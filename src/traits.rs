@@ -47,11 +47,16 @@ impl AstExt for Ast {
 
 pub trait SysInfoExt {
     fn lg_default() -> Self;
+    fn lg_with_version(version: PythonVersion) -> Self;
 }
 
 impl SysInfoExt for SysInfo {
     fn lg_default() -> Self {
-        SysInfo::new_without_type_checking(PythonVersion::default(), PythonPlatform::default())
+        Self::lg_with_version(crate::runner::default_python_version())
+    }
+
+    fn lg_with_version(version: PythonVersion) -> Self {
+        SysInfo::new_without_type_checking(version, PythonPlatform::default())
     }
 }
 

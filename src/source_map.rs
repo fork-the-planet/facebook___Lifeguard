@@ -23,8 +23,10 @@ use tracing::warn;
 
 use crate::debug::report_memory;
 use crate::module_parser::ParsedModule;
-use crate::module_parser::parse_pyi;
-use crate::module_parser::read_and_parse_source;
+use crate::module_parser::parse_pyi_with_version;
+use crate::module_parser::read_and_parse_source_with_version;
+use crate::pyrefly::sys_info::PythonVersion;
+use crate::runner::default_python_version;
 use crate::stubs::Stubs;
 use crate::tracing::time;
 
@@ -260,11 +262,21 @@ fn make_source_info_map(
 /// Parse a single module on demand from its SourceInfo.
 /// For file-backed modules, reads and parses the file at root_dir/path.
 /// For stub modules (path is None), parses the stub source from Stubs.
-fn parse_module(info: &SourceInfo, root_dir: &Path, stubs: &Stubs) -> Option<AstResult> {
+fn parse_module(
+    info: &SourceInfo,
+    root_dir: &Path,
+    stubs: &Stubs,
+    version: PythonVersion,
+) -> Option<AstResult> {
     match &info.path {
         Some(path) => {
             let full_path = root_dir.join(path);
-            let result = match read_and_parse_source(&full_path, info.name, info.is_init) {
+            let result = match read_and_parse_source_with_version(
+                &full_path,
+                info.name,
+                info.is_init,
+                version,
+            ) {
                 Ok(parsed) => AstResult::Ok(parsed),
                 Err(e) => AstResult::ParserError(e),
             };
@@ -273,7 +285,12 @@ fn parse_module(info: &SourceInfo, root_dir: &Path, stubs: &Stubs) -> Option<Ast
         None => {
             // Stub module: look up raw source from stubs
             let src = stubs.get_raw_source(&info.name)?;
-            Some(AstResult::Ok(parse_pyi(src, info.name, info.is_init)))
+            Some(AstResult::Ok(parse_pyi_with_version(
+                src,
+                info.name,
+                info.is_init,
+                version,
+            )))
         }
     }
 }
@@ -304,10 +321,19 @@ pub struct Sources {
     root_dir: PathBuf,
     stubs: Stubs,
     stub_overrides: AHashSet<ModuleName>,
+    python_version: PythonVersion,
 }
 
 impl Sources {
     pub fn new(source_map: SourceMap, root_dir: PathBuf) -> Self {
+        Self::new_with_version(source_map, root_dir, default_python_version())
+    }
+
+    pub fn new_with_version(
+        source_map: SourceMap,
+        root_dir: PathBuf,
+        python_version: PythonVersion,
+    ) -> Self {
         let stubs = Stubs::new();
         let (info_map, stub_overrides) = time("Building source info map", || {
             make_source_info_map(source_map, &stubs)
@@ -318,6 +344,7 @@ impl Sources {
             root_dir,
             stubs,
             stub_overrides,
+            python_version,
         }
     }
 }
@@ -337,7 +364,7 @@ impl ModuleProvider for Sources {
 
     fn parse(&self, name: &ModuleName) -> Option<AstResult> {
         let info = self.info_map.get(name)?;
-        parse_module(info, &self.root_dir, &self.stubs)
+        parse_module(info, &self.root_dir, &self.stubs, self.python_version)
     }
 
     fn is_stub(&self, name: &ModuleName) -> bool {

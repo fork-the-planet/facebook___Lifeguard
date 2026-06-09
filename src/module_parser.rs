@@ -10,8 +10,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use pyrefly_python::module_name::ModuleName;
+use ruff_python_ast::Mod;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::PySourceType;
+use ruff_python_parser::ParseOptions;
+
+use crate::pyrefly::sys_info::PythonVersion;
+use crate::runner::default_python_version;
+use crate::runner::to_ruff_version;
 
 // Operations on a single module, either .py or .pyi
 
@@ -78,14 +84,29 @@ pub fn parse_file(
     name: ModuleName,
     is_init: bool,
 ) -> ParsedModule {
-    let res = ruff_python_parser::parse_unchecked_source(source, typ);
+    parse_file_with_version(source, typ, name, is_init, default_python_version())
+}
+
+pub fn parse_file_with_version(
+    source: &str,
+    typ: PySourceType,
+    name: ModuleName,
+    is_init: bool,
+    version: PythonVersion,
+) -> ParsedModule {
+    // Use Python version to support `lazy` keyword
+    let options = ParseOptions::from(typ).with_target_version(to_ruff_version(&version));
+    let res = ruff_python_parser::parse_unchecked(source, options);
     let newline_positions = compute_newline_positions(source);
+    let Mod::Module(ast) = res.into_syntax() else {
+        unreachable!("PySourceType::Python and ::Stub always produce Mod::Module")
+    };
     let is_thrift = typ == PySourceType::Python
         && name.as_str().ends_with(".ttypes")
         && is_thrift_generated(source);
     ParsedModule {
         name,
-        ast: res.into_syntax(),
+        ast,
         source_type: typ,
         is_init,
         is_thrift_generated: is_thrift,
@@ -97,8 +118,26 @@ pub fn parse_source(source: &str, module_name: ModuleName, is_init: bool) -> Par
     parse_file(source, PySourceType::Python, module_name, is_init)
 }
 
+pub fn parse_source_with_version(
+    source: &str,
+    module_name: ModuleName,
+    is_init: bool,
+    version: PythonVersion,
+) -> ParsedModule {
+    parse_file_with_version(source, PySourceType::Python, module_name, is_init, version)
+}
+
 pub fn parse_pyi(source: &str, module_name: ModuleName, is_init: bool) -> ParsedModule {
     parse_file(source, PySourceType::Stub, module_name, is_init)
+}
+
+pub fn parse_pyi_with_version(
+    source: &str,
+    module_name: ModuleName,
+    is_init: bool,
+    version: PythonVersion,
+) -> ParsedModule {
+    parse_file_with_version(source, PySourceType::Stub, module_name, is_init, version)
 }
 
 pub fn read_and_parse_source(
@@ -106,10 +145,24 @@ pub fn read_and_parse_source(
     module_name: ModuleName,
     is_init: bool,
 ) -> Result<ParsedModule> {
+    read_and_parse_source_with_version(path, module_name, is_init, default_python_version())
+}
+
+pub fn read_and_parse_source_with_version(
+    path: &PathBuf,
+    module_name: ModuleName,
+    is_init: bool,
+    version: PythonVersion,
+) -> Result<ParsedModule> {
     // Handle non-utf-8 encodings via lossy conversion.
     let bytes = std::fs::read(path)?;
     let source = String::from_utf8_lossy(&bytes);
-    Ok(parse_source(&source, module_name, is_init))
+    Ok(parse_source_with_version(
+        &source,
+        module_name,
+        is_init,
+        version,
+    ))
 }
 
 /// Given the text contents of a file, compute a sorted array of byte positions where all the

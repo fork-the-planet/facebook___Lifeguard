@@ -21,16 +21,65 @@ use crate::output::LifeGuardAnalysis;
 use crate::output::write_verbose;
 use crate::project;
 use crate::project::CachingMode;
+use crate::pyrefly::sys_info::PythonVersion;
 use crate::source_map::SourceMap;
 use crate::source_map::Sources;
 use crate::tracing::time;
-use crate::traits::SysInfoExt;
+
+pub const DEFAULT_PYTHON_VERSION: &str = "3.14";
+
+pub fn default_python_version() -> PythonVersion {
+    DEFAULT_PYTHON_VERSION
+        .parse()
+        .expect("invalid DEFAULT_PYTHON_VERSION")
+}
+
+pub fn default_ruff_version() -> ruff_python_ast::PythonVersion {
+    to_ruff_version(&default_python_version())
+}
+
+pub fn parse_python_version(s: &str) -> Result<PythonVersion> {
+    let version = s
+        .parse::<PythonVersion>()
+        .map_err(|e| anyhow::anyhow!("Invalid python version '{}': {}", s, e))?;
+    if version.major != 3 || version.minor < 12 {
+        anyhow::bail!(
+            "Unsupported python version '{}': minimum supported version is 3.12",
+            s
+        );
+    }
+    Ok(version)
+}
+
+pub fn to_ruff_version(v: &PythonVersion) -> ruff_python_ast::PythonVersion {
+    match (v.major, v.minor) {
+        (3, 12) => ruff_python_ast::PythonVersion::PY312,
+        (3, 13) => ruff_python_ast::PythonVersion::PY313,
+        (3, 14) => ruff_python_ast::PythonVersion::PY314,
+        (3, 15) => ruff_python_ast::PythonVersion::PY315,
+        // parse_python_version validates >= 3.12, so this only triggers
+        // for future versions not yet in ruff; fall back to latest known.
+        _ => ruff_python_ast::PythonVersion::PY315,
+    }
+}
 
 /// Options for the analysis pipeline.
 pub struct Options {
     pub verbose_output_path: Option<PathBuf>,
     pub sorted_output: bool,
     pub main_module: Option<ModuleName>,
+    pub python_version: PythonVersion,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            verbose_output_path: None,
+            sorted_output: false,
+            main_module: None,
+            python_version: default_python_version(),
+        }
+    }
 }
 
 /// Intermediate results from the analysis pipeline, before final output generation.
@@ -48,12 +97,12 @@ pub fn run_pipeline(
     src_map: SourceMap,
     root_dir: &std::path::Path,
     caching: CachingMode,
-    main_module: Option<ModuleName>,
+    options: &Options,
 ) -> Result<PipelineResult> {
-    let config = AnalysisConfig::new(crate::pyrefly::sys_info::SysInfo::lg_default(), main_module);
+    let config = AnalysisConfig::with_python_version(options.python_version, options.main_module);
 
     let sources = time("Building sources", || {
-        Sources::new(src_map, root_dir.to_path_buf())
+        Sources::new_with_version(src_map, root_dir.to_path_buf(), options.python_version)
     });
 
     let (import_graph, exports) = time("Creating import graph and exports", || {
@@ -92,12 +141,7 @@ pub fn process_source_map(
     root_dir: &std::path::Path,
     options: &Options,
 ) -> Result<LifeGuardAnalysis> {
-    let result = run_pipeline(
-        src_map,
-        root_dir,
-        CachingMode::Disabled,
-        options.main_module,
-    )?;
+    let result = run_pipeline(src_map, root_dir, CachingMode::Disabled, options)?;
     let PipelineResult {
         sources,
         safety_map,

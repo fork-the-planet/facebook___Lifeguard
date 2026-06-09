@@ -1061,9 +1061,8 @@ mod tests {
     #[test]
     fn test_side_effect_imports_do_not_observe_same_pass_updates() {
         let options = Options {
-            verbose_output_path: None,
             sorted_output: true,
-            main_module: None,
+            ..Options::default()
         };
         let exports = Exports::empty();
 

@@ -15,6 +15,8 @@ use clap::Parser;
 use serde::Serialize;
 
 use crate::find_sources::build_source_db;
+use crate::runner::DEFAULT_PYTHON_VERSION;
+use crate::runner::parse_python_version;
 
 #[derive(Parser)]
 pub struct GenSourceDbArgs {
@@ -27,6 +29,10 @@ pub struct GenSourceDbArgs {
     /// Path to site-packages directory (overrides pyproject.toml setting)
     #[arg(long)]
     site_packages: Option<PathBuf>,
+
+    /// Python version to use for parsing
+    #[arg(long = "python-version", default_value = DEFAULT_PYTHON_VERSION)]
+    python_version: String,
 }
 
 #[derive(Serialize)]
@@ -35,7 +41,12 @@ struct SourceDb {
 }
 
 pub fn run(args: GenSourceDbArgs) -> Result<()> {
-    let (build_map, seed_count) = build_source_db(&args.input_dir, args.site_packages.as_deref())?;
+    let python_version = parse_python_version(&args.python_version)?;
+    let (build_map, seed_count) = build_source_db(
+        &args.input_dir,
+        args.site_packages.as_deref(),
+        python_version,
+    )?;
     eprintln!(
         "Seeded with {} files from {}",
         seed_count,

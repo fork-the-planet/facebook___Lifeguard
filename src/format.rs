@@ -294,15 +294,30 @@ fn format_comprehensions(generators: &[ruff_python_ast::Comprehension]) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use ruff_python_ast::ModModule;
     use ruff_python_ast::PySourceType;
-    use ruff_python_parser::parse_unchecked_source;
+    use ruff_python_parser::ParseOptions;
 
     use super::*;
+    use crate::runner::default_ruff_version;
+
+    fn parse_module(source: &str) -> ModModule {
+        let options =
+            ParseOptions::from(PySourceType::Python).with_target_version(default_ruff_version());
+        let parsed = ruff_python_parser::parse_unchecked(source, options);
+        match parsed.into_syntax() {
+            ruff_python_ast::Mod::Module(m) => m,
+            _ => panic!("Expected module"),
+        }
+    }
 
     fn parse_expr(source: &str) -> Expr {
-        let parsed = parse_unchecked_source(source, PySourceType::Python);
-        let module = parsed.into_syntax();
-        match module.body.into_iter().next().expect("empty module") {
+        match parse_module(source)
+            .body
+            .into_iter()
+            .next()
+            .expect("empty module")
+        {
             ruff_python_ast::Stmt::Expr(stmt) => *stmt.value,
             other => panic!("Expected expression statement, got {:?}", other),
         }
@@ -440,9 +455,7 @@ mod tests {
     #[test]
     fn test_await() {
         // Parse inside an async function to make it valid
-        let source = "async def f():\n await x";
-        let parsed = parse_unchecked_source(source, PySourceType::Python);
-        let module = parsed.into_syntax();
+        let module = parse_module("async def f():\n await x");
         let func = match &module.body[0] {
             ruff_python_ast::Stmt::FunctionDef(f) => f,
             other => panic!("Expected FunctionDef, got {:?}", other),

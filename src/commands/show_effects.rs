@@ -17,12 +17,18 @@ use crate::debug::print_module_imports_map;
 use crate::imports::ImportGraph;
 use crate::module_parser;
 use crate::pyrefly::module_name::ModuleName;
+use crate::runner::DEFAULT_PYTHON_VERSION;
+use crate::runner::parse_python_version;
 use crate::source_map::ModuleProvider;
 use crate::test_lib::TestSources;
 
 #[derive(Parser)]
 pub struct ShowEffectsArgs {
     input_file: PathBuf,
+
+    /// Python version to use for parsing
+    #[arg(long = "python-version", default_value = DEFAULT_PYTHON_VERSION)]
+    python_version: String,
 }
 
 pub fn run(args: ShowEffectsArgs) -> Result<()> {
@@ -30,16 +36,18 @@ pub fn run(args: ShowEffectsArgs) -> Result<()> {
     let path = args.input_file;
     let source = std::fs::read_to_string(&path)?;
 
+    let python_version = parse_python_version(&args.python_version)?;
+    let config = AnalysisConfig::with_python_version(python_version, None);
+
     let sources = TestSources::new(&[("current_module", &source)]);
-    let config = AnalysisConfig::default();
     let (import_graph, exports) = ImportGraph::make_with_exports(&sources, &config);
 
-    // Run the analysis
     let typ = module_parser::file_source_type(&path).unwrap();
     let is_init = path
         .file_name()
         .is_some_and(|f| f == "__init__.py" || f == "__init__.pyi");
-    let module = module_parser::parse_file(&source, typ, module_name, is_init);
+    let module =
+        module_parser::parse_file_with_version(&source, typ, module_name, is_init, python_version);
     let output = analyzer::analyze(&module, &exports, &import_graph, sources.stubs(), &config);
 
     // Display output

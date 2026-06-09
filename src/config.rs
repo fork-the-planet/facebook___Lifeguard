@@ -11,6 +11,7 @@ use ruff_python_ast::Expr;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtIf;
 
+use crate::pyrefly::sys_info::PythonVersion;
 use crate::pyrefly::sys_info::SysInfo;
 use crate::traits::SysInfoExt;
 
@@ -60,6 +61,16 @@ impl AnalysisConfig {
     pub fn new(sys_info: SysInfo, main_module: Option<ModuleName>) -> Self {
         Self {
             sys_info,
+            main_module,
+        }
+    }
+
+    pub fn with_python_version(
+        python_version: PythonVersion,
+        main_module: Option<ModuleName>,
+    ) -> Self {
+        Self {
+            sys_info: SysInfo::lg_with_version(python_version),
             main_module,
         }
     }

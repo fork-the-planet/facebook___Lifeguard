@@ -15,7 +15,9 @@ use pyrefly_python::module_name::ModuleName;
 use tracing::info;
 
 use crate::debug::report_peak_memory;
+use crate::runner::DEFAULT_PYTHON_VERSION;
 use crate::runner::Options;
+use crate::runner::parse_python_version;
 use crate::runner::process_source_map;
 use crate::source_map;
 use crate::tracing::ProcessTimer;
@@ -55,6 +57,10 @@ pub struct AnalyzeArgs {
     /// Name of the main module (the module run as __main__)
     #[arg(long = "main-module")]
     pub main_module: Option<String>,
+
+    /// Python version to use for parsing
+    #[arg(long = "python-version", default_value = DEFAULT_PYTHON_VERSION)]
+    pub python_version: String,
 }
 
 pub fn run(args: AnalyzeArgs) -> Result<()> {
@@ -78,10 +84,13 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         None => std::env::current_dir()?,
     };
 
+    let python_version = parse_python_version(&args.python_version)?;
+
     let options = Options {
         verbose_output_path: args.verbose_output_path,
         sorted_output: args.sorted_output,
         main_module: args.main_module.map(|s| ModuleName::from_str(&s)),
+        python_version,
     };
 
     let lifeguard_output = process_source_map(src_map, &root_dir, &options)?;
