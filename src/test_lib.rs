@@ -26,12 +26,13 @@ use crate::format::ErrorString;
 use crate::imports::ImportGraph;
 use crate::module_effects::ModuleEffects;
 use crate::module_parser::ParsedModule;
-use crate::module_parser::parse_pyi;
-use crate::module_parser::parse_source;
+use crate::module_parser::parse_pyi_with_version;
+use crate::module_parser::parse_source_with_version;
 use crate::module_safety::ModuleSafety;
 use crate::project;
 use crate::project::AnalysisMap;
 use crate::project::SafetyMap;
+use crate::pyrefly::sys_info::PythonVersion;
 use crate::source_map::AstResult;
 use crate::source_map::ModuleProvider;
 use crate::stubs::Stubs;
@@ -50,18 +51,27 @@ pub struct TestSources {
     parse_errors: AHashSet<ModuleName>,
     stubs: Stubs,
     names: Vec<ModuleName>,
+    python_version: PythonVersion,
 }
 
 impl TestSources {
     pub fn new(modules: &[(&str, &str)]) -> Self {
-        Self::new_impl(modules, &[])
+        Self::new_impl(modules, &[], PythonVersion::default())
+    }
+
+    pub fn new_with_version(modules: &[(&str, &str)], python_version: PythonVersion) -> Self {
+        Self::new_impl(modules, &[], python_version)
     }
 
     pub fn new_with_stubs(modules: &[(&str, &str)], stub_names: &[&str]) -> Self {
-        Self::new_impl(modules, stub_names)
+        Self::new_impl(modules, stub_names, PythonVersion::default())
     }
 
-    fn new_impl(modules: &[(&str, &str)], stub_names: &[&str]) -> Self {
+    fn new_impl(
+        modules: &[(&str, &str)],
+        stub_names: &[&str],
+        python_version: PythonVersion,
+    ) -> Self {
         let stubs = Stubs::new();
 
         // Collect all names: stubs first, then test modules (test modules override stubs)
@@ -86,6 +96,7 @@ impl TestSources {
             parse_errors: AHashSet::new(),
             stubs,
             names,
+            python_version,
         }
     }
 
@@ -126,7 +137,12 @@ impl ModuleProvider for TestSources {
         // Test modules take priority over stubs
         if let Some(code) = self.modules.get(name) {
             if self.stub_modules.contains(name) {
-                return Some(AstResult::Ok(parse_pyi(code, *name, false)));
+                return Some(AstResult::Ok(parse_pyi_with_version(
+                    code,
+                    *name,
+                    false,
+                    self.python_version,
+                )));
             }
             // A module is an __init__.py (package) if any other module is a child of it
             let name_prefix = format!("{}.", name.as_str());
@@ -134,12 +150,22 @@ impl ModuleProvider for TestSources {
                 .names
                 .iter()
                 .any(|n| n.as_str().starts_with(&name_prefix));
-            return Some(AstResult::Ok(parse_source(code, *name, is_init)));
+            return Some(AstResult::Ok(parse_source_with_version(
+                code,
+                *name,
+                is_init,
+                self.python_version,
+            )));
         }
 
         // Fall back to stubs
         if let Some(src) = self.stubs.get_raw_source(name) {
-            return Some(AstResult::Ok(parse_pyi(src, *name, false)));
+            return Some(AstResult::Ok(parse_pyi_with_version(
+                src,
+                *name,
+                false,
+                self.python_version,
+            )));
         }
 
         None

@@ -43,6 +43,10 @@ pub struct ModuleEffects {
     // i.e if we have import A as C and C.foo() is called we should map C.foo() to A.foo()
     // we get the canonical value using the re_exports table
     pub indirectly_called_methods: AHashMap<ModuleName, ModuleName>,
+
+    // Modules imported via non-lazy import statements. Used to distinguish
+    // side-effect imports from explicit lazy imports that have no effect when unused.
+    pub eager_imports: AHashSet<ModuleName>,
 }
 
 impl ModuleEffects {
@@ -56,6 +60,7 @@ impl ModuleEffects {
             all_called_import_names: AHashSet::new(),
             called_functions: AHashSet::new(),
             indirectly_called_methods: AHashMap::new(),
+            eager_imports: AHashSet::new(),
         }
     }
 

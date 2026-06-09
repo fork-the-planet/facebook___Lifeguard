@@ -327,6 +327,7 @@ impl GlobalAnalysisState {
 
 /// Compute side-effect imports: module-level imports never accessed in any scope.
 /// These are imports that exist solely for their side effects (e.g., decorator registration).
+/// Lazy imports that are never accessed have no side effects, so they are excluded.
 fn compute_side_effect_imports(analysis_map: &AnalysisMap) -> SideEffectMap {
     let results: Vec<_> = analysis_map
         .par_iter()
@@ -338,6 +339,7 @@ fn compute_side_effect_imports(analysis_map: &AnalysisMap) -> SideEffectMap {
 
             let side_effects: AHashSet<ModuleName> = module_pending
                 .difference(&output.module_effects.all_called_import_names)
+                .filter(|m| output.module_effects.eager_imports.contains(m))
                 .copied()
                 .collect();
 

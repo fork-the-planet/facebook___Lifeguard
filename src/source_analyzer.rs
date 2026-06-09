@@ -1249,6 +1249,9 @@ impl<'a> SourceAnalyzer<'a> {
     fn add_pending_import(&self, x: &StmtImport, output: &mut ModuleEffects) {
         for name in &x.names {
             let to = ModuleName::from_name(&name.name.id);
+            if !x.is_lazy {
+                output.eager_imports.insert(to);
+            }
             match &name.asname {
                 None => output.add_pending_import(to, &self.cursor.scope()),
                 Some(asname) => {
@@ -1279,6 +1282,10 @@ impl<'a> SourceAnalyzer<'a> {
             x.module.as_ref().map(|x| &x.id),
         ) {
             let scope = self.cursor.scope();
+
+            if !x.is_lazy {
+                output.eager_imports.insert(m);
+            }
 
             // `from x import y` adds `x` as a dependency
             if m.as_str() != "" {
