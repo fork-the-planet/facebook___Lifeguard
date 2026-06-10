@@ -191,6 +191,24 @@ def f(x):
     }
 
     #[test]
+    fn test_method_call_resolves_with_none_fallback() {
+        // We should not infer ctx: None and raise an unknown-method error.
+        let code = r#"
+class Ctx:
+    def load_verify_locations(self):
+        pass
+
+try:
+    ctx = Ctx()
+except ImportError:
+    ctx = None
+
+ctx.load_verify_locations()
+"#;
+        check(code);
+    }
+
+    #[test]
     fn test_dynamic_imports_dunder_import() {
         let code = r#"
 c = __import__("sys") # E: prohibited-call

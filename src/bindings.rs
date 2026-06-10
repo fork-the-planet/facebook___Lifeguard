@@ -56,6 +56,10 @@ impl Value {
         matches!(self, Self::Unknown)
     }
 
+    pub fn is_none_type(&self) -> bool {
+        matches!(self, Self::Instance(m) if m.as_str() == "builtins.NoneType")
+    }
+
     pub fn as_module_name(&self) -> Option<&ModuleName> {
         match self {
             Self::Module(module)
@@ -431,6 +435,20 @@ impl<'a, 'b> BindingsTableBuilder<'a, 'b> {
     fn add_binding(&mut self, name: Name, value: Value) {
         let scope = self.cursor.scope();
         let bindings = self.bindings.entry(scope).or_default();
+        // A variable assigned both a concrete type and `None` (e.g. the common
+        // `x = factory()` / `except: x = None` fallback) keeps its non-`None`
+        // type for method resolution: a method call is only meaningful on the
+        // non-`None` member, and calling a method on `None` crashes regardless of
+        // lazy imports, so it is not a lazy-import concern. Bindings are
+        // flow-insensitive, so without this a later `= None` would clobber the
+        // concrete type and make every method call on the variable unresolvable.
+        if value.is_none_type()
+            && let Some(existing) = bindings.get(&name)
+            && !existing.is_unknown()
+            && !existing.is_none_type()
+        {
+            return;
+        }
         bindings.insert(name, value);
     }
 
@@ -849,6 +867,54 @@ c = C()
                 ("test", "c", "foo.C"),
             ],
         );
+    }
+
+    #[test]
+    fn test_none_does_not_clobber_concrete_type() {
+        // The common `x = Factory()` / `except: x = None` fallback pattern assigns
+        // `x` both a concrete type and `None`. For method resolution we want the
+        // non-`None` type: a method call is only meaningful on the non-`None`
+        // member, and calling a method on `None` crashes regardless of lazy
+        // imports, so it is not a lazy-import concern. The `None` assignment must
+        // therefore not clobber the concrete type.
+        let test = r#"
+class A:
+    pass
+
+x = A()
+x = None
+"#;
+        let modules = vec![("test", test)];
+        let bt = make_bindings("test", &modules);
+        test_instances(&bt, vec![("test", "x", "test.A")]);
+    }
+
+    #[test]
+    fn test_concrete_type_overwrites_none() {
+        // A concrete assignment following a `None` assignment still resolves to
+        // the concrete type (the reverse order of the fallback pattern).
+        let test = r#"
+class A:
+    pass
+
+x = None
+x = A()
+"#;
+        let modules = vec![("test", test)];
+        let bt = make_bindings("test", &modules);
+        test_instances(&bt, vec![("test", "x", "test.A")]);
+    }
+
+    #[test]
+    fn test_none_only_binding_stays_none() {
+        // A variable only ever assigned `None` keeps its `NoneType` binding; the
+        // non-`None` preference must not invent a type that was never assigned.
+        let test = r#"
+x = None
+"#;
+        let modules = vec![("test", test)];
+        let bt = make_bindings("test", &modules);
+        test_instances(&bt, vec![("test", "x", "builtins.NoneType")]);
     }
 
     #[test]
