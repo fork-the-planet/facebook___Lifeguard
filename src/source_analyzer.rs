@@ -137,6 +137,25 @@ fn get_qualified_import(res: &ResolvedName, attribute_module: &ModuleName) -> Op
     Some(full_module)
 }
 
+fn is_builtin_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::StringLiteral(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::FString(_)
+            | Expr::TString(_)
+            | Expr::List(_)
+            | Expr::Dict(_)
+            | Expr::Set(_)
+            | Expr::Tuple(_)
+            | Expr::ListComp(_)
+            | Expr::SetComp(_)
+            | Expr::DictComp(_)
+    )
+}
+
 /// Implementation of Analyzer for source files (.py).
 pub struct SourceAnalyzer<'a> {
     parsed_module: &'a ParsedModule,
@@ -319,6 +338,13 @@ impl<'a> SourceAnalyzer<'a> {
     }
 
     fn unknown_function_name(&self, func: &Expr, output: &mut ModuleEffects) {
+        // A method call whose receiver is a freshly-constructed builtin literal operates on a value
+        // with no external aliasing, so it cannot have an import-time side effect.
+        if let Expr::Attribute(e) = func
+            && is_builtin_literal(&e.value)
+        {
+            return;
+        }
         trace!("Unknown call: {}(...)", format::format_expr(func));
         let name = match func {
             Expr::Attribute(e) => match *e.value {

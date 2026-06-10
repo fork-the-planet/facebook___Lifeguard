@@ -176,6 +176,34 @@ def f(x):
     }
 
     #[test]
+    fn test_method_call_on_literal_safe() {
+        // A method call on a freshly-constructed builtin literal is safe.
+        let code = r#"
+a = ":".join(["x", "y"])
+b = "hello".upper()
+c = [1, 2].index(1)
+d = {"k": 1}.get("k")
+e = (1, 2).count(1)
+f = {1, 2}.union({3})
+g = b"x".decode()
+h = f"v={a}".strip()
+i = [x for x in range(3)].pop()
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_method_call_on_literal_still_checks_args() {
+        // The spurious unknown-method-call effect is suppressed, but an imported
+        // argument passed to the literal's method is still flagged.
+        let code = r#"
+import os
+[].append(os)  # E: imported-var-argument
+"#;
+        check_effects(code);
+    }
+
+    #[test]
     fn test_imported_method_call() {
         let code1 = r#"
             class C:
