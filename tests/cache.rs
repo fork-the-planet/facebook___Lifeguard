@@ -522,6 +522,51 @@ mod tests {
     }
 
     #[test]
+    fn test_unsafe_if_imported_verdict_independent_of_caller_module() {
+        // `bump` mutates a module global, so it is UnsafeIfImported (safe only
+        // when called from within `lib`). `helper` calls `bump` within the same
+        // module, so `helper` is Safe: `bump`'s mutation always runs inside `lib`'s
+        // own call chain, no matter who calls `helper`. `trigger` (in another
+        // module) also calls `helper`.
+        //
+        // Regression test for caller-module threading: a function's cached verdict
+        // must be computed against its immediate caller, not whichever entry point
+        // happened to reach it first. Previously, if precompute reached `helper`
+        // via the cross-module `trigger` first, `bump` was judged cross-module and
+        // `helper` was cached Unsafe — an order-dependent (and wrong) verdict.
+        let cache = build_cache(&TestSources::new(&[
+            (
+                "lib",
+                "counter = 0\n\
+                 def bump():\n\
+                 \x20   global counter\n\
+                 \x20   counter += 1\n\
+                 def helper():\n\
+                 \x20   bump()\n",
+            ),
+            (
+                "other",
+                "from lib import helper\n\
+                 def trigger():\n\
+                 \x20   helper()\n",
+            ),
+        ]));
+
+        let lib = cache.modules.iter().find(|m| m.name == mn("lib")).unwrap();
+        assert_eq!(
+            lib.function_safety.get("bump").map(|i| i.verdict),
+            Some(FunctionSafety::UnsafeIfImported),
+            "bump mutates a module global, so it is UnsafeIfImported",
+        );
+        assert_eq!(
+            lib.function_safety.get("helper").map(|i| i.verdict),
+            Some(FunctionSafety::Safe),
+            "helper only calls bump within its own module, so it is Safe regardless \
+             of cross-module callers",
+        );
+    }
+
+    #[test]
     fn test_resolve_to_known_module_exact_and_parent() {
         let known = [mn("foo"), mn("bar.baz")].into_iter().collect();
 

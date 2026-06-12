@@ -1368,8 +1368,19 @@ impl ProjectInfo {
                         ret = false;
                     } else {
                         call.stack.push(eff.name);
+                        // During the module-scope pass, thread the importing module
+                        // so `UnsafeIfImported` callees are judged against "is this
+                        // module safe to import". During verdict precompute
+                        // (is_module_scope == false), judge callees against the
+                        // *immediate* caller (this function's module) so the cached
+                        // verdict is independent of which entry point reached it.
+                        let child_caller_module = if call.is_module_scope {
+                            call.caller_module
+                        } else {
+                            call_module
+                        };
                         let mut child_call = Call {
-                            caller_module: call.caller_module,
+                            caller_module: child_caller_module,
                             effect: eff,
                             func: eff.name,
                             stack: std::mem::take(&mut call.stack),
