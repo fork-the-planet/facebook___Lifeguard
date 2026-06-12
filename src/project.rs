@@ -1389,6 +1389,17 @@ impl ProjectInfo {
                         if !self.check_call_safety(&mut child_call, state, false)? {
                             self.mark_caller_unsafe_for_failed_callee(&func, &child_call, state);
                             ret = false;
+                        } else if state
+                            .function_safety
+                            .get(&child_call.func)
+                            .is_some_and(|i| i.verdict == FunctionSafety::UnsafeIfImported)
+                            && self.functions.get(&child_call.func) == Some(call_module)
+                        {
+                            // propagate `UnsafeIfImported` to the caller
+                            state.mark_unsafe_if_imported(&func);
+                            if is_cross_module_call {
+                                ret = false;
+                            }
                         }
                         call.stack = child_call.stack;
                         call.stack.pop();

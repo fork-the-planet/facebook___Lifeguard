@@ -522,18 +522,19 @@ mod tests {
     }
 
     #[test]
-    fn test_unsafe_if_imported_verdict_independent_of_caller_module() {
-        // `bump` mutates a module global, so it is UnsafeIfImported (safe only
-        // when called from within `lib`). `helper` calls `bump` within the same
-        // module, so `helper` is Safe: `bump`'s mutation always runs inside `lib`'s
-        // own call chain, no matter who calls `helper`. `trigger` (in another
-        // module) also calls `helper`.
+    fn test_unsafe_if_imported_propagates_through_same_module_caller() {
+        // `bump` mutates a module global -> UnsafeIfImported. `helper` calls `bump`
+        // within the same module, so it *inherits* UnsafeIfImported: running
+        // `helper` transitively mutates `lib`'s global, which is safe only when
+        // `helper` is called from `lib` itself. `trigger`, in another module, calls
+        // `helper` cross-module, so importing `trigger`'s module would trigger the
+        // mutation -> `trigger` is hard Unsafe.
         //
-        // Regression test for caller-module threading: a function's cached verdict
-        // must be computed against its immediate caller, not whichever entry point
-        // happened to reach it first. Previously, if precompute reached `helper`
-        // via the cross-module `trigger` first, `bump` was judged cross-module and
-        // `helper` was cached Unsafe — an order-dependent (and wrong) verdict.
+        // This guards two things: (1) the "...if imported" qualifier propagates
+        // through a same-module intermediary rather than being discharged to Safe
+        // (otherwise a cross-module caller further up is wrongly treated as safe),
+        // and (2) each verdict depends only on module membership, not on which
+        // entry point the analysis reached the function from first.
         let cache = build_cache(&TestSources::new(&[
             (
                 "lib",
@@ -560,9 +561,19 @@ mod tests {
         );
         assert_eq!(
             lib.function_safety.get("helper").map(|i| i.verdict),
-            Some(FunctionSafety::Safe),
-            "helper only calls bump within its own module, so it is Safe regardless \
-             of cross-module callers",
+            Some(FunctionSafety::UnsafeIfImported),
+            "helper calls bump within its own module, so it inherits UnsafeIfImported",
+        );
+
+        let other = cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("other"))
+            .unwrap();
+        assert_eq!(
+            other.function_safety.get("trigger").map(|i| i.verdict),
+            Some(FunctionSafety::Unsafe),
+            "trigger calls helper cross-module, so it is hard Unsafe",
         );
     }
 
