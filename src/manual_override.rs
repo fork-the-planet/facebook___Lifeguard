@@ -32,6 +32,7 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     "libfb.py.decorators.memoize_timed",
     "libfb.py.memoize.memoize_fast",
     "libfb.py.memoize.memoize_fast_0",
+    "libfb.py.memoize.memoize_timed",
     "psutil._common.memoize",
     "psutil._common.memoize_when_activated",
     // Functions that use the ABCMeta registry, which is hard to analyze but it is safe.
