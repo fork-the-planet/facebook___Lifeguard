@@ -10,6 +10,9 @@
 use std::collections::HashMap;
 use std::mem;
 use std::sync::LazyLock;
+use std::sync::OnceLock;
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 
 use ahash::AHashMap;
 use ahash::AHashSet;
@@ -19,6 +22,7 @@ use dashmap::DashMap;
 use pyrefly_python::module_name::ModuleName;
 use rayon::prelude::*;
 use ruff_text_size::TextRange;
+use tracing::warn;
 
 use crate::analyzer;
 use crate::analyzer::AnalyzedModule;
@@ -375,10 +379,34 @@ pub fn run_analysis(
     time("  Filtering out stubs", || {
         filter_out_stubs(&safety_map, sources)
     });
+
+    // Deallocating ProjectInfo takes seconds on large projects. Hand it to a
+    // dedicated background thread so the dealloc is non-blocking
+    drop_in_background(info);
+
     AnalysisOutput {
         safety_map,
         side_effect_imports,
         parse_errors,
+    }
+}
+
+/// Dedicated thread for deallocating project info
+fn drop_in_background<T: Send + 'static>(value: T) {
+    static DROPPER: OnceLock<Sender<Box<dyn FnOnce() + Send>>> = OnceLock::new();
+    let sender = DROPPER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        std::thread::Builder::new()
+            .name("lifeguard-dealloc".to_owned())
+            .spawn(move || rx.into_iter().for_each(|dropper| dropper()))
+            .expect("failed to spawn background dropper thread");
+        tx
+    });
+    // If the designated thread exits unexpectedly, drop inline rather than leak.
+    if let Err(err) = sender.send(Box::new(move || drop(value))) {
+        warn!("background deallocation thread unavailable; dropping inline");
+        let dropper = err.0;
+        dropper();
     }
 }
 
