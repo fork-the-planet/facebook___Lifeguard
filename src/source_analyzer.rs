@@ -44,6 +44,7 @@ use tracing::trace;
 use crate::analyzer::AnalyzedModule;
 use crate::analyzer::Analyzer;
 use crate::bindings::Alias;
+use crate::bindings::Value;
 use crate::class::FieldKind;
 use crate::config::AnalysisConfig;
 use crate::cursor::Block;
@@ -629,8 +630,22 @@ impl<'a> SourceAnalyzer<'a> {
             && typ.is_none()
             && self.info.stubs.is_method_safe_in_builtins(&attr.id);
 
+        // A call through the class itself (`C.method(obj, ...)`) passes the
+        // receiver explicitly, so argument-to-parameter alignment differs from a
+        // bound call (`obj.method(...)`).
+        let receiver_is_class = res.definition.is_class()
+            || matches!(
+                self.info.bindings.lookup(&res.scope, &res.name),
+                Some(Value::Class(_))
+            );
+        let kind = if receiver_is_class {
+            EffectKind::UnboundMethodCall
+        } else {
+            EffectKind::MethodCall
+        };
+
         if !is_safe_builtin_method {
-            let eff = Effect::with_data(EffectKind::MethodCall, fname, range, data);
+            let eff = Effect::with_data(kind, fname, range, data);
             self.add_effect(eff, output);
         }
 

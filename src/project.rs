@@ -896,6 +896,86 @@ impl CallStack {
     }
 }
 
+/// The functions a constructor call to `cls_name` may dispatch to, in the
+/// order `check_constructor_call` checks them: the metaclass `__new__` and
+/// `__init__` (if the class has a metaclass), then `__init__` and
+/// `__post_init__` on the class itself (the latter is called by the
+/// dataclass-generated `__init__`).
+/// TODO: Look up `__init__` in the MRO.
+fn constructor_method_names(
+    cls_name: ModuleName,
+    classes: &ClassTable,
+) -> impl Iterator<Item = ModuleName> {
+    let metaclass = classes.lookup(&cls_name).and_then(|cls| cls.metaclass);
+    metaclass
+        .into_iter()
+        .flat_map(|mcls| [mcls.append_str("__new__"), mcls.append_str("__init__")])
+        .chain([
+            cls_name.append_str("__init__"),
+            cls_name.append_str("__post_init__"),
+        ])
+}
+
+/// Number of implicit leading parameters (the receiver) for a method call.
+/// Returns `None` when the method's kind is unknown (e.g. class could not be resolved).
+fn method_receiver_offset(method: &ModuleName, classes: &ClassTable, bound: bool) -> Option<usize> {
+    let (class, leaf) = method.split_attr()?;
+    Some(match classes.lookup(&class)?.get_field(&leaf)?.kind {
+        FieldKind::StaticMethod => 0,
+        FieldKind::ClassMethod => 1,
+        FieldKind::InstanceMethod => usize::from(bound),
+        _ => return None,
+    })
+}
+
+/// Yield each `(callee, arg_offset)` a call binds to: the function(s) whose
+/// parameters the call's explicit arguments map to, paired with the number of
+/// implicit leading parameters (the receiver) to skip.
+fn iter_callees<'a>(
+    eff: &'a Effect,
+    classes: &'a ClassTable,
+) -> impl Iterator<Item = (ModuleName, usize)> + 'a {
+    let is_method = matches!(
+        eff.kind,
+        EffectKind::MethodCall | EffectKind::UnboundMethodCall
+    );
+    let is_constructor = !is_method && classes.contains(&eff.name);
+
+    // Constructor calls dispatch to each constructor method (offset 1); empty
+    // for non-constructor calls.
+    let constructors = is_constructor
+        .then(|| constructor_method_names(eff.name, classes))
+        .into_iter()
+        .flatten()
+        .map(|method| (method, 1));
+
+    // Method / plain function calls resolve to a single callee (`eff.name`) at
+    // one or two offsets; empty for constructor calls.
+    let (offset, extra_offset) = match eff.kind {
+        _ if is_constructor => (None, None),
+        EffectKind::MethodCall => match method_receiver_offset(&eff.name, classes, true) {
+            Some(offset) => (Some(offset), None),
+            // Unknown kind (e.g. a builtin / third-party class): assume an
+            // implicit receiver, as bound calls usually have one.
+            None => (Some(1), None),
+        },
+        EffectKind::UnboundMethodCall => match method_receiver_offset(&eff.name, classes, false) {
+            Some(offset) => (Some(offset), None),
+            // Unknown kind: the receiver may be explicit (0) or implicit (1), so
+            // consider both to avoid missing a mutated parameter.
+            None => (Some(0), Some(1)),
+        },
+        _ => (Some(0), None),
+    };
+    let name = eff.name;
+    let single = offset
+        .into_iter()
+        .chain(extra_offset)
+        .map(move |offset| (name, offset));
+
+    constructors.chain(single)
+}
+
 // Immutable global information derived from the project
 struct ProjectInfo {
     analysis_map: AnalysisMap,
@@ -1213,7 +1293,9 @@ impl ProjectInfo {
                 let err = SafetyError::new_from_effect(ErrorKind::UnknownFunctionCall, call.effect);
                 Ok(err)
             }
-            EffectKind::MethodCall | EffectKind::ParamMethodCall => {
+            EffectKind::MethodCall
+            | EffectKind::UnboundMethodCall
+            | EffectKind::ParamMethodCall => {
                 let err = SafetyError::new_from_effect(ErrorKind::UnknownMethodCall, call.effect);
                 Ok(err)
             }
@@ -1300,21 +1382,8 @@ impl ProjectInfo {
         Ok(ret)
     }
 
-    /// The functions a constructor call to `cls_name` may dispatch to, in the
-    /// order `check_constructor_call` checks them: the metaclass `__new__` and
-    /// `__init__` (if the class has a metaclass), then `__init__` and
-    /// `__post_init__` on the class itself (the latter is called by the
-    /// dataclass-generated `__init__`).
-    /// TODO: Look up `__init__` in the MRO.
     fn constructor_methods(&self, cls_name: ModuleName) -> impl Iterator<Item = ModuleName> {
-        let metaclass = self.classes.lookup(&cls_name).and_then(|cls| cls.metaclass);
-        metaclass
-            .into_iter()
-            .flat_map(|mcls| [mcls.append_str("__new__"), mcls.append_str("__init__")])
-            .chain([
-                cls_name.append_str("__init__"),
-                cls_name.append_str("__post_init__"),
-            ])
+        constructor_method_names(cls_name, &self.classes)
     }
 
     fn check_constructor_call(&self, call: &Call, state: &GlobalAnalysisState) -> Result<bool> {
@@ -1333,21 +1402,29 @@ impl ProjectInfo {
     /// - the called function specifically mutates the passed-in imported variable
     ///   OR we cannot do precise arg matching and therefore fall back to assuming it's a potential
     ///   mutation
+    ///
+    /// `arg_offset` is the number of implicit leading parameters (the receiver)
+    /// to skip, so that explicit positional argument `i` matches parameter
+    /// `i + arg_offset` (e.g. 1 for a bound method or constructor's `self`).
     fn mutated_param_receives_imported_arg(
         call_data: &CallData,
         callee: &ModuleName,
         eff: &Effect,
         defs: Option<&DefinitionTable>,
+        arg_offset: usize,
     ) -> bool {
         if eff.kind != EffectKind::ParamMethodCall {
             return false;
         }
         let param_name = eff.name.as_str();
 
-        // Positional args: does the mutated param's index match an unsafe arg?
+        // Positional args: does the mutated param's index (minus the receiver
+        // offset) match an unsafe arg?
         if let Some(param_idx) = defs.and_then(|d| d.get_param_index(callee, param_name)) {
-            if call_data.has_unsafe_arg_index(param_idx) {
-                return true;
+            if let Some(arg_idx) = param_idx.checked_sub(arg_offset) {
+                if call_data.has_unsafe_arg_index(arg_idx) {
+                    return true;
+                }
             }
         }
 
@@ -1366,47 +1443,45 @@ impl ProjectInfo {
         !call_data.has_any_tracked_args()
     }
 
-    /// Whether `call_effect` passes an imported variable to a parameter that the
-    /// callee mutates, i.e. running this call mutates imported state.
-    fn call_mutates_imported_arg(
+    /// Whether `call_data` passes an imported variable into a parameter that
+    /// `callee` mutates, with explicit args starting at `arg_offset`.
+    /// (Helper function for `call_mutates_imported_arg()` below.)
+    fn callee_mutates_imported_arg(
         &self,
-        call_effect: &Effect,
+        call_data: &CallData,
         callee: &ModuleName,
-        callee_effs: &[Effect],
+        arg_offset: usize,
     ) -> bool {
+        let Some(callee_effs) = self.effect_table.get(callee) else {
+            return false;
+        };
+        let callee_module = self.functions.get(callee).copied().unwrap_or(*callee);
+        let defs = self
+            .analysis_map
+            .get(&callee_module)
+            .map(|m| &m.definitions);
+        callee_effs.iter().any(|eff| {
+            Self::mutated_param_receives_imported_arg(call_data, callee, eff, defs, arg_offset)
+        })
+    }
+
+    /// Whether `call_effect` passes an imported variable to a parameter the callee
+    /// mutates, i.e. running this call mutates imported state.
+    fn call_mutates_imported_arg(&self, call_effect: &Effect) -> bool {
         let EffectData::Call(ref call_data) = call_effect.data else {
             return false;
         };
         if !call_data.has_unsafe_args() {
             return false;
         }
-        let callee_module = self.functions.get(callee).copied().unwrap_or(*callee);
-        let defs = self
-            .analysis_map
-            .get(&callee_module)
-            .map(|m| &m.definitions);
-        callee_effs
-            .iter()
-            .any(|eff| Self::mutated_param_receives_imported_arg(call_data, callee, eff, defs))
+        iter_callees(call_effect, &self.classes)
+            .any(|(callee, offset)| self.callee_mutates_imported_arg(call_data, &callee, offset))
     }
 
-    fn check_call_params(&self, call: &Call, effs: &[Effect], state: &GlobalAnalysisState) {
-        let EffectData::Call(ref call_data) = call.effect.data else {
-            return;
-        };
-        if !call_data.has_unsafe_args() {
-            return;
-        }
-
-        let func = &call.func;
-        let func_module = self.functions.get(func).copied().unwrap_or(*func);
-        let defs = self.analysis_map.get(&func_module).map(|m| &m.definitions);
-
-        for eff in effs {
-            if Self::mutated_param_receives_imported_arg(call_data, func, eff, defs) {
-                let err = SafetyError::new_from_effect(ErrorKind::ImportedVarArgument, call.effect);
-                state.add_error_to_module(call.caller_module, err);
-            }
+    fn check_call_params(&self, call: &Call, state: &GlobalAnalysisState) {
+        if self.call_mutates_imported_arg(call.effect) {
+            let err = SafetyError::new_from_effect(ErrorKind::ImportedVarArgument, call.effect);
+            state.add_error_to_module(call.caller_module, err);
         }
     }
 
@@ -1423,9 +1498,7 @@ impl ProjectInfo {
         let effs = self.effect_table.get(&func);
 
         if call.is_module_scope {
-            if let Some(effs) = effs {
-                self.check_call_params(call, effs, state);
-            }
+            self.check_call_params(call, state);
         }
 
         if let Some(verdict) = state.function_safety.get(&func).map(|info| info.verdict) {
@@ -1447,13 +1520,11 @@ impl ProjectInfo {
                     state.mark_unsafe(&func);
                     ret = false;
                 } else if eff.kind.is_runnable() {
-                    // If we pass an imported variable to a function that mutates it, mark the
-                    // current function as unsafe.
-                    if let Some(callee_effs) = self.effect_table.get(&eff.name) {
-                        if self.call_mutates_imported_arg(eff, &eff.name, callee_effs) {
-                            state.mark_unsafe(&func);
-                            ret = false;
-                        }
+                    // If we pass an imported variable to a function that mutates it
+                    // (directly or transitively), mark the current function as unsafe.
+                    if self.call_mutates_imported_arg(eff) {
+                        state.mark_unsafe(&func);
+                        ret = false;
                     }
                     if call.stack.contains(&eff.name) {
                         // We have a recursive function call; mark it unsafe

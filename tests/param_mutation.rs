@@ -199,6 +199,66 @@ configure(settings)  # E: imported-var-argument
     }
 
     // -----------------------------------------------------------------------
+    // Unbound method calls through the class (explicit receiver)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unbound_method_call_imported_arg() {
+        // `C.method(o, A)` passes the receiver explicitly, so the imported `A` is
+        // at explicit arg 1, which maps to the mutated parameter `x`. The method
+        // is safe in isolation (subscript mutation), so only the param-mutation
+        // check can catch it — and it must account for the explicit receiver.
+        let code = r#"
+from foo import A
+
+class C:
+    def method(self, x):
+        x["k"] = 1
+
+o = {}
+C.method(o, A)  # E: imported-var-argument
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_unbound_classmethod_call_imported_arg() {
+        // A classmethod called via the class still has an implicit `cls`, so the
+        // imported `A` is at explicit arg 0, mapping to mutated parameter `x`.
+        // The method's `FieldKind::ClassMethod` gives the correct offset of 1.
+        let code = r#"
+from foo import A
+
+class C:
+    @classmethod
+    def make(cls, x):
+        x["k"] = 1
+
+C.make(A)  # E: imported-var-argument
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_bound_staticmethod_call_imported_arg() {
+        // A staticmethod has no implicit receiver even when called bound, so the
+        // imported `A` is at explicit arg 0, mapping to mutated parameter `x`.
+        // The method's `FieldKind::StaticMethod` gives the correct offset of 0.
+        let code = r#"
+from foo import A
+
+class C:
+    @staticmethod
+    def sink(x):
+        x["k"] = 1
+
+c = C()
+c.sink(A)  # E: imported-var-argument
+"#;
+        check(code);
+    }
+
+    // -----------------------------------------------------------------------
     // Combination: method call + attr mutation on different params
     // -----------------------------------------------------------------------
 
@@ -850,6 +910,41 @@ def f(source, target):
     target.extend(source)
 
 f(A, target=[])  # E: unsafe-function-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_bound_method_receiver_param_mutation() {
+        // A bound method has `self` as parameter 0, so the imported argument is at
+        // explicit position 0 but mutated parameter `x` is at param index 1. The
+        // receiver offset must line them up.
+        let code = r#"
+from foo import A
+
+class Box:
+    def sink(self, x):
+        x.attr = 1
+
+c = Box()
+c.sink(A)  # E: imported-var-argument
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_constructor_imported_param_mutation() {
+        // A call to a class dispatches into `__init__`, whose `self` is parameter
+        // 0, so the imported argument at explicit position 0 maps to `x` at param
+        // index 1.
+        let code = r#"
+from foo import A
+
+class Box:
+    def __init__(self, x):
+        x.attr = 1
+
+Box(A)  # E: imported-var-argument
 "#;
         check(code);
     }

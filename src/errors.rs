@@ -221,7 +221,9 @@ impl SafetyError {
             EffectKind::FunctionCall | EffectKind::ImportedFunctionCall => {
                 ErrorKind::UnsafeFunctionCall
             }
-            EffectKind::MethodCall | EffectKind::ImportedTypeAttr => ErrorKind::UnsafeMethodCall,
+            EffectKind::MethodCall
+            | EffectKind::UnboundMethodCall
+            | EffectKind::ImportedTypeAttr => ErrorKind::UnsafeMethodCall,
             _ => return Err(anyhow!("Unexpected call effect {:?}", eff)),
         };
         Ok(Self {

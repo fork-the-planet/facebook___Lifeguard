@@ -64,6 +64,7 @@ pub trait DefinitionExt {
     fn get_imported_module_name(&self) -> Option<ModuleName>;
     fn is_import(&self) -> bool;
     fn is_param(&self) -> bool;
+    fn is_class(&self) -> bool;
 }
 
 impl DefinitionExt for Definition {
@@ -86,6 +87,14 @@ impl DefinitionExt for Definition {
             self.style,
             DefinitionStyle::Annotated(SymbolKind::Parameter, _)
                 | DefinitionStyle::Unannotated(SymbolKind::Parameter)
+        )
+    }
+
+    fn is_class(&self) -> bool {
+        matches!(
+            self.style,
+            DefinitionStyle::Annotated(SymbolKind::Class, _)
+                | DefinitionStyle::Unannotated(SymbolKind::Class)
         )
     }
 }

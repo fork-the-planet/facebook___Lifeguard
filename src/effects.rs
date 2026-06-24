@@ -47,8 +47,10 @@ pub enum EffectKind {
     ImportedFunctionCall,
     // Accessing an attribute on an imported type (may be a property).
     ImportedTypeAttr,
-    // Calling a method.
+    // Calling a bound method, e.g. `obj.method(...)`
     MethodCall,
+    // Calling a method through the class, e.g. `C.method(obj, ...)`
+    UnboundMethodCall,
     // Calling a method on a function parameter.
     ParamMethodCall,
     // Calling a locally-defined function.
@@ -122,6 +124,7 @@ impl EffectKind {
                 | Self::DecoratorCall
                 | Self::ImportedDecoratorCall
                 | Self::MethodCall
+                | Self::UnboundMethodCall
         )
     }
 
