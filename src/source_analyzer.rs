@@ -386,9 +386,12 @@ impl<'a> SourceAnalyzer<'a> {
             self.add_effect(eff, output);
             return ArgClass::Imported;
         }
-        // A bare reference to one of the current function's parameters.
-        if res.definition.is_param() && self.cursor.current_function_scope() == Some(res.scope) {
-            return ArgClass::ForwardedParam(ModuleName::from_name(&res.name));
+        // A reference to one of the current function's parameters, directly or
+        // through a local alias (`y = x; g(y)` forwards `x`).
+        if let Some((scope, param)) = self.receiver_param(&res)
+            && self.cursor.current_function_scope() == Some(scope)
+        {
+            return ArgClass::ForwardedParam(ModuleName::from_name(&param));
         }
         ArgClass::Other
     }
@@ -658,11 +661,15 @@ impl<'a> SourceAnalyzer<'a> {
             _ => fname,
         };
 
+        // A receiver that refers to a parameter, directly or through a local
+        // alias (`y = x`), is treated as a parameter mutation.
+        let receiver_param = self.receiver_param(res);
+
         // For param receivers with unknown type, check if the method is
         // known-safe across all builtin types (e.g. copy, get, index).
         // Only applies to builtins — user-defined classes with same-named
         // methods are not affected since their types aren't in the builtins stub.
-        let is_safe_builtin_method = res.definition.is_param()
+        let is_safe_builtin_method = receiver_param.is_some()
             && typ.is_none()
             && self.info.stubs.is_method_safe_in_builtins(&attr.id);
 
@@ -683,15 +690,15 @@ impl<'a> SourceAnalyzer<'a> {
 
         self.check_indirectly_called_method(fname, res, attr, output);
 
-        if res.definition.is_param() && !is_safe_builtin_method {
-            let is_mutating = match typ {
-                Some(t) => self.may_mutate_receiver(t, &attr.id),
-                None => true,
-            };
-            if is_mutating {
-                let param_name = ModuleName::from_name(&res.name);
-                let eff = Effect::new(EffectKind::ParamMethodCall, param_name, range);
-                self.add_param_effect(res, eff, output);
+        if let Some(param) = &receiver_param {
+            if !is_safe_builtin_method {
+                let is_mutating = match typ {
+                    Some(t) => self.may_mutate_receiver(t, &attr.id),
+                    None => true,
+                };
+                if is_mutating {
+                    self.add_param_method_call(param, range, output);
+                }
             }
         };
 
@@ -893,10 +900,8 @@ impl<'a> SourceAnalyzer<'a> {
             let eff = Effect::new(EffectKind::ImportedVarMutation, name, obj.range());
             self.add_effect(eff, output);
         }
-        if res.definition.is_param() {
-            let name = ModuleName::from_name(&res.name);
-            let eff = Effect::new(EffectKind::ParamMethodCall, name, obj.range());
-            self.add_param_effect(&res, eff, output);
+        if let Some(param) = self.receiver_param(&res) {
+            self.add_param_method_call(&param, obj.range(), output);
         };
     }
 
@@ -1012,9 +1017,10 @@ impl<'a> SourceAnalyzer<'a> {
         } else {
             match target {
                 Expr::Subscript(e) => self.check_subscript(e, output),
-                Expr::Attribute(_) if res.definition.is_param() => {
-                    let eff = Effect::new(EffectKind::ParamMethodCall, name, target.range());
-                    self.add_param_effect(&res, eff, output);
+                Expr::Attribute(_) => {
+                    if let Some(param) = self.receiver_param(&res) {
+                        self.add_param_method_call(&param, target.range(), output);
+                    }
                 }
                 _ => {}
             }
@@ -1529,13 +1535,44 @@ impl<'a> SourceAnalyzer<'a> {
         output.add_effect(self.cursor.scope(), eff);
     }
 
-    /// Record a ParamMethodCall effect in the scope where the parameter was defined.
-    /// When a nested function mutates a captured parameter from an enclosing
-    /// function, the effect must be attributed to the enclosing function's scope
-    /// so that check_call_params can match the param name to the function's
-    /// parameter list.
-    fn add_param_effect(&self, res: &ResolvedName, eff: Effect, output: &mut ModuleEffects) {
-        output.add_effect(res.scope, eff);
+    /// If `res` ultimately resolves to a parameter, return that parameter's defining scope and
+    /// name.
+    fn receiver_param(&self, res: &ResolvedName) -> Option<(ModuleName, Name)> {
+        if res.definition.is_param() {
+            return Some((res.scope, res.name.clone()));
+        }
+        match self.info.bindings.resolve(&res.scope, &res.name)? {
+            Alias::Local(scope, name)
+                if self
+                    .info
+                    .definitions
+                    .get(scope, name)
+                    .is_some_and(|d| d.is_param()) =>
+            {
+                Some((*scope, name.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Record a `ParamMethodCall` effect for a mutation of `param` (scope, name)
+    /// in the scope where the parameter is defined.
+    /// We need the defining scope because when a nested function mutates a captured parameter from
+    /// an enclosing function, the effect must be attributed to the enclosing function's scope so
+    /// that check_call_params can match the param name to the function's parameter list.
+    fn add_param_method_call(
+        &self,
+        param: &(ModuleName, Name),
+        range: TextRange,
+        output: &mut ModuleEffects,
+    ) {
+        let (param_scope, param_name) = param;
+        let eff = Effect::new(
+            EffectKind::ParamMethodCall,
+            ModuleName::from_name(param_name),
+            range,
+        );
+        output.add_effect(*param_scope, eff);
     }
 
     /// Whether `res` resolves to a class definition, directly or through a local alias chain.

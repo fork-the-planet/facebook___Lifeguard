@@ -1039,7 +1039,6 @@ f(A)
     }
 
     #[test]
-    #[ignore] // TODO(T237092592): Track param aliasing
     fn test_param_aliased_then_mutated_is_unsafe() {
         // If the param is aliased (not copied) and the alias is mutated,
         // the original is affected.
@@ -1051,6 +1050,145 @@ def f(x):
     y.append(1)
 
 f(A)  # E: imported-var-argument  # E: unsafe-function-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_aliased_param_forwarded_to_mutating_call() {
+        // `y` aliases param `x`, then is forwarded to `g`, which mutates its
+        // parameter. The alias must be followed when classifying the argument so
+        // that `x` is recognized as the forwarded parameter. (`g` is safe in
+        // isolation via subscript mutation, so only the forwarding path can flag
+        // this.)
+        let a = r#"
+def g(item):
+    item["k"] = 1
+"#;
+        let main = r#"
+from a import g
+from foo import A
+
+def f(x):
+    y = x
+    g(y)
+
+f(A)  # E: imported-var-argument
+"#;
+        check_all(vec![("a", a), ("main", main)]);
+    }
+
+    #[test]
+    fn test_param_aliased_two_hops_then_mutated_is_unsafe() {
+        // Two-hop local alias chain: z = y; y = x; then mutate z.
+        // Should resolve through bindings.resolve to original parameter.
+        let code = r#"
+from foo import A
+
+def f(x):
+    y = x
+    z = y
+    z.append(1)
+
+f(A)  # E: imported-var-argument  # E: unsafe-function-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_param_aliased_three_hops_then_mutated_is_unsafe() {
+        // Three-hop chain exercises depth limit increase from 5 to 32
+        // and visited-set cycle protection.
+        let code = r#"
+from foo import A
+
+def f(x):
+    y = x
+    z = y
+    w = z
+    w.append(1)
+
+f(A)  # E: imported-var-argument  # E: unsafe-function-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_aliased_param_forwarded_two_hops() {
+        // Two-hop alias before forwarding should still be tracked.
+        let a = r#"
+def g(item):
+    item["k"] = 1
+"#;
+        let main = r#"
+from a import g
+from foo import A
+
+def f(x):
+    y = x
+    z = y
+    g(z)
+
+f(A)  # E: imported-var-argument
+"#;
+        check_all(vec![("a", a), ("main", main)]);
+    }
+
+    #[test]
+    fn test_tuple_unpack_alias_not_tracked() {
+        // Known limitation: tuple unpack alias is not handled by assign_single
+        // which only tracks simple Name targets. Currently treats y as unknown
+        // receiver, so flags unsafe-function-call but not imported-var-argument
+        // (false negative for param tracking, true positive for unknown call).
+        // Documenting for future work to make conservative and track tuple unpack.
+        let code = r#"
+from foo import A
+
+def f(x):
+    y, _ = x, 1
+    y.append(1)
+
+f(A)  # E: unsafe-function-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_closure_capture_param_alias_mutation() {
+        // Nested function mutates captured parameter via local alias.
+        // Current implementation attributes ParamMethodCall to enclosing scope
+        // via add_param_method_call, so this should be caught.
+        let code = r#"
+from foo import A
+
+def f(x):
+    def g():
+        y = x
+        y.append(1)
+    g()
+
+f(A)  # E: imported-var-argument  # E: unsafe-function-call
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_param_reassigned_then_aliased_is_safe() {
+        // After reassignment, alias should ideally point to new value not original param.
+        // At D109081384 stage without clear_alias yet (added in D109086207),
+        // current behavior flags as unsafe (false positive) via imported-var-argument
+        // because y is resolved as alias to x parameter even after reassignment.
+        // Documenting current behavior; update test to expect no error after D109086207.
+        let code = r#"
+from foo import A
+
+def f(x):
+    x = []
+    y = x
+    y.append(1)
+
+
+f(A)  # E: imported-var-argument
 "#;
         check(code);
     }

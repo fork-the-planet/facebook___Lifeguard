@@ -106,7 +106,8 @@ fn resolve_alias<'a>(
     let mut current_name = name;
     let mut visited = AHashSet::with_capacity(8);
     let mut last_ret: Option<&'a Alias> = None;
-    // Bound call depth at 32 even if we never hit an infinite recursion.
+
+    // Bound call depth, as well as detecting recursive cycles via `visited`.
     for _ in 0..32 {
         if !visited.insert((current_scope, current_name.clone())) {
             // Cycle detected — return last valid alias to preserve old behavior.
