@@ -173,6 +173,11 @@ impl BindingsTable {
         self.lookup_alias(&ModuleName::from_str(scope), &Name::new(name))
     }
 
+    #[cfg(test)]
+    pub(crate) fn resolve_str(&self, scope: &str, name: &str) -> Option<&Alias> {
+        self.resolve(&ModuleName::from_str(scope), &Name::new(name))
+    }
+
     pub fn get_type(&self, scope: &ModuleName, name: &Name) -> Option<&ModuleName> {
         let val = self.lookup(scope, name)?;
         match val {
@@ -258,6 +263,15 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
         aliases.insert(name, rhs);
     }
 
+    /// Remove any existing alias for `name` in the current scope. Called when a
+    /// name is reassigned, so a stale alias from an earlier assignment does not
+    /// outlive it (e.g. `y = x; y = []` must not leave `y -> x`).
+    fn clear_alias(&mut self, name: &Name) {
+        if let Some(scope_aliases) = self.aliases.get_mut(&self.cursor.scope()) {
+            scope_aliases.remove(name);
+        }
+    }
+
     fn extract_aliases(&mut self, body: &[Stmt]) {
         self.stmts(body);
     }
@@ -306,6 +320,17 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
             return;
         };
 
+        // Self-assignment is a no-op for alias tracking; preserve existing alias
+        // to avoid spurious clearing followed by failed re-resolution.
+        if let Expr::Name(rhs_name) = rhs {
+            if rhs_name.id == name {
+                return;
+            }
+        }
+
+        // A reassignment invalidates any earlier alias for this name.
+        self.clear_alias(&name);
+
         if let Expr::Call(call) = rhs {
             let import_module_state = get_import_module_state_from_def(
                 &self.definitions.definitions,
@@ -332,8 +357,16 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
         let r = self.definitions.resolve(&self.cursor, rhs);
         if let Some(res) = r {
             if res.definition.is_import() {
-                // We cannot resolve this to a type, but we know it's an imported value
-                if let Some(rhs_name) = res.try_qualified_name() {
+                // Reuse the import's existing alias entry so e.g. `d = c` points at c's target.
+                if let Some(existing) = self
+                    .aliases
+                    .get(&res.scope)
+                    .and_then(|a| a.get(&res.name))
+                    .cloned()
+                {
+                    self.add_alias(name.clone(), existing);
+                } else if let Some(rhs_name) = res.try_qualified_name() {
+                    // We cannot resolve this to a type, but we know it's an imported value
                     self.add_alias(name.clone(), Alias::Global(Value::Variable(rhs_name)));
                 } else {
                     // We don't even have a name but we still want to track this as a cross-module
@@ -341,7 +374,22 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
                     self.add_alias(name.clone(), Alias::Global(Value::Unknown));
                 }
             } else if matches!(rhs, Expr::Name(_)) {
-                self.add_alias(name, Alias::Local(res.scope, res.name));
+                let global_alias = self
+                    .aliases
+                    .get(&res.scope)
+                    .and_then(|a| a.get(&res.name))
+                    .filter(|a| matches!(a, Alias::Global(_)))
+                    .cloned();
+                if let Some(existing) = global_alias {
+                    // The rhs already carries a global binding (an import bound to
+                    // a local). Snapshot it so that a later reassignment of the rhs
+                    // does not retroactively change this alias.
+                    self.add_alias(name, existing);
+                } else {
+                    // Reference to a local with no global binding (e.g. a parameter
+                    // or a local-variable chain), resolved transitively on lookup.
+                    self.add_alias(name, Alias::Local(res.scope, res.name));
+                }
             }
         }
     }
@@ -854,6 +902,79 @@ def f():
         let code = r#"
 from m2 import X as xx
 xx()
+"#;
+        let modules = vec![("test", code)];
+        let bt = make_bindings("test", &modules);
+        assert_eq!(
+            bt.lookup_alias_str("test", "xx"),
+            Some(&Alias::Global(Value::Variable(ModuleName::from_str(
+                "m2.X"
+            ))))
+        );
+    }
+
+    #[test]
+    fn test_reassignment_clears_stale_alias() {
+        // Reassigning a name must drop its earlier alias rather than leaving a
+        // stale binding to the original target.
+        let code = r#"
+A = 10
+y = A
+y = []
+"#;
+        let modules = vec![("test", code)];
+        let bt = make_bindings("test", &modules);
+        assert_eq!(bt.lookup_alias_str("test", "y"), None);
+    }
+
+    #[test]
+    fn test_re_aliased_import_points_to_original_target() {
+        // `d = c` where `c` is itself an import alias must reuse `c`'s binding so
+        // `d` points at the original import target, not a re-derived name.
+        let code = r#"
+from m2 import X as c
+d = c
+"#;
+        let modules = vec![("test", code)];
+        let bt = make_bindings("test", &modules);
+        let expected = Alias::Global(Value::Variable(ModuleName::from_str("m2.X")));
+        assert_eq!(bt.lookup_alias_str("test", "c"), Some(&expected));
+        assert_eq!(bt.lookup_alias_str("test", "d"), Some(&expected));
+    }
+
+    #[test]
+    fn test_resolve_follows_multi_hop_local_chain() {
+        // resolve() walks a chain of local aliases to its terminal binding,
+        // whereas lookup_alias() returns only the immediate hop.
+        let code = r#"
+A = 10
+
+def f():
+    x = A
+    y = x
+    z = y
+"#;
+        let modules = vec![("test", code)];
+        let bt = make_bindings("test", &modules);
+        assert_eq!(
+            bt.lookup_alias_str("test.f", "z"),
+            Some(&Alias::Local(
+                ModuleName::from_str("test.f"),
+                Name::new("y")
+            ))
+        );
+        assert_eq!(
+            bt.resolve_str("test.f", "z"),
+            Some(&Alias::Local(ModuleName::from_str("test"), Name::new("A")))
+        );
+    }
+
+    #[test]
+    fn test_self_assignment_preserves_alias_binding() {
+        // `xx = xx` is a no-op for alias tracking and must not clear the binding.
+        let code = r#"
+from m2 import X as xx
+xx = xx
 "#;
         let modules = vec![("test", code)];
         let bt = make_bindings("test", &modules);

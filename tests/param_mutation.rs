@@ -308,6 +308,144 @@ D.method(o, A)  # E: imported-var-argument
         check(code);
     }
 
+    #[test]
+    fn test_multihop_aliased_import_mutates_param() {
+        // `c` aliases the imported `configure`, then `d = c` re-aliases it.
+        // The re-alias must resolve to `setup.configure` (not a re-qualified
+        // intermediate) to detect that the call mutates the imported argument.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as c
+from config import settings
+
+d = c
+d(settings)  # E: imported-var-argument
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
+    #[test]
+    fn test_multihop_local_realias_import_mutates_param() {
+        // `c` is the import alias, `d = c` re-aliases the import, and `e = d`
+        // snapshots `d`'s binding, so `e` resolves to `setup.configure`.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as c
+from config import settings
+
+d = c
+e = d
+e(settings)  # E: imported-var-argument
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
+    #[test]
+    fn test_local_alias_survives_source_reassignment() {
+        // `e = d` captures the import binding `d` holds at that point. Rebinding
+        // `d` afterwards must not retroactively change `e`, which still refers to
+        // `configure`.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as c
+from config import settings
+
+d = c
+e = d
+d = lambda s: None
+e(settings)  # E: imported-var-argument
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
+    #[test]
+    fn test_reassigned_import_alias_is_safe() {
+        // Reassigning `y` to a lambda drops its earlier import alias, so `y()` is
+        // not flagged as imported-var-argument; unknown-function-call still fires
+        // because a lambda is not a known-safe call.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as c
+from config import settings
+
+y = c
+y = lambda s: None
+y(settings)  # E: unknown-function-call
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
+    #[test]
+    fn test_self_assignment_preserves_alias() {
+        // Self-assignment (`d = d`) is a no-op and must preserve the alias chain.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as c
+from config import settings
+
+d = c
+d = d
+d(settings)  # E: imported-var-argument
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
+    #[test]
+    fn test_shadowed_alias_in_nested_scope() {
+        // Inner scope shadows outer alias name; outer alias should remain intact
+        // for outer scope calls, inner should resolve separately.
+        // clear_alias only affects current scope, so shadowing is safe.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as c
+from config import settings
+
+def inner():
+    c = lambda s: None
+    c(settings)
+
+c(settings)  # E: imported-var-argument
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
+    #[test]
+    fn test_five_hop_aliased_import() {
+        // Import binding propagated through a five-assignment chain.
+        let setup = r#"
+def configure(x):
+    x.enabled = True
+"#;
+        let main = r#"
+from setup import configure as a
+from config import settings
+b = a
+c = b
+d = c
+e = d
+e(settings)  # E: imported-var-argument
+"#;
+        check_all(vec![("setup", setup), ("main", main)]);
+    }
+
     // -----------------------------------------------------------------------
     // Combination: method call + attr mutation on different params
     // -----------------------------------------------------------------------
@@ -1007,10 +1145,10 @@ outer([])  # E: unsafe-function-call
 
     #[test]
     fn test_reassigned_param_not_forwarded() {
-        // Parameter reassigned to new list before forwarding.
-        // Current behavior at D108941987: still flags as imported-var-argument
-        // because alias tracking does not yet clear on reassignment.
-        // D109086207 adds clear_alias to fix this false positive; update test then.
+        // Known false positive: the parameter is rebound to a fresh list before
+        // being forwarded, so forwarding `x` to `g` cannot leak the imported value.
+        // Parameter rebinding is not modeled in forwarding analysis (only alias-
+        // variable reassignment is, via clear_alias), so this is still flagged.
         let code = r#"
 from foo import A
 
@@ -1120,8 +1258,7 @@ f(A)  # E: imported-var-argument  # E: unsafe-function-call
 
     #[test]
     fn test_param_aliased_three_hops_then_mutated_is_unsafe() {
-        // Three-hop chain exercises depth limit increase from 5 to 32
-        // and visited-set cycle protection.
+        // Three-hop local alias chain
         let code = r#"
 from foo import A
 
@@ -1197,11 +1334,11 @@ f(A)  # E: imported-var-argument  # E: unsafe-function-call
 
     #[test]
     fn test_param_reassigned_then_aliased_is_safe() {
-        // After reassignment, alias should ideally point to new value not original param.
-        // At D109081384 stage without clear_alias yet (added in D109086207),
-        // current behavior flags as unsafe (false positive) via imported-var-argument
-        // because y is resolved as alias to x parameter even after reassignment.
-        // Documenting current behavior; update test to expect no error after D109086207.
+        // Known false positive: the parameter is rebound to a fresh list, so the
+        // later alias `y = x` refers to that list, not the imported value. Name
+        // resolution still maps `x` to the original parameter (parameter rebinding
+        // is not modeled), so mutating `y` is attributed to the parameter. Unlike
+        // alias-variable reassignment, clear_alias does not help here.
         let code = r#"
 from foo import A
 
@@ -1212,6 +1349,25 @@ def f(x):
 
 
 f(A)  # E: imported-var-argument
+"#;
+        check(code);
+    }
+
+    #[test]
+    fn test_param_alias_then_reassigned_is_safe() {
+        // `y` aliases the parameter, then is reassigned to a fresh local. The
+        // reassignment invalidates the alias, so mutating `y` afterwards must
+        // not be attributed to the parameter. (Subscript assignment isolates
+        // the parameter-mutation path from unresolved-method-call effects.)
+        let code = r#"
+from foo import A
+
+def f(x):
+    y = x
+    y = {}
+    y["k"] = 1
+
+f(A)
 "#;
         check(code);
     }

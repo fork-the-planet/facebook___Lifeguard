@@ -525,14 +525,14 @@ impl<'a> SourceAnalyzer<'a> {
         call_name: &ModuleName,
         res: &ResolvedName,
     ) -> Option<ModuleName> {
-        // Look up the alias for the base name in the scope the variable was
-        // introduced
-        let alias = self
-            .info
-            .bindings
-            .lookup_alias(&res.scope, &res.name)
-            .map(|v| v.as_str())
-            .unwrap_or("");
+        // Resolve the base name's alias chain to its terminal binding. Only a
+        // module-qualified Global yields a valid substitution: a Local terminal
+        // (broken chain, cycle, or depth bound in resolve) carries a local
+        // variable name, which would produce a bogus module name here.
+        let alias = match self.info.bindings.resolve(&res.scope, &res.name) {
+            Some(Alias::Global(value)) => value.as_module_name().map(|m| m.as_str()).unwrap_or(""),
+            _ => return None,
+        };
         if alias.is_empty() {
             return None;
         }
