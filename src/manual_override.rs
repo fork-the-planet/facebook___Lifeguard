@@ -133,6 +133,13 @@ const SAFE_FUNCTIONS_ARRAY: &[&str] = &[
     // module-level CONFIG_MAPPING_NAMES/MODEL_NAMES_MAPPING constants (no mutation)
     // and assigns to fn.__doc__ on the decorated function only.
     "transformers.models.auto.configuration_auto.replace_list_option_in_docstrings",
+    "artillery.artillery2.api.cython.agent_tracing.devmate.decorators.devmate_trace_action",
+    // Runs an async function synchronously.
+    "libfb.py.asyncio.await_utils.await_sync_decorator",
+    // Retry decorator factory.
+    "fblearner.flow.util.python_utils.call_with_retries",
+    //  pure functools.wraps closure
+    "devai.src.core.model.experimental.base.reclassify_class_errors",
 ];
 
 /// Copy of SAFE_FUNCTIONS_ARRAY as a global set for faster searching.
