@@ -172,86 +172,30 @@ pub enum ArgSlot {
     /// position (the given index). We can't tell which ones precisely, so it
     /// conservatively maps to every positional parameter at or after that index.
     /// This is the parameter-forwarding counterpart of
-    /// [`CallData::unsafe_args_expansion_min`], which models the same `*args`
+    /// [`ImportedArgs::unsafe_args_expansion_min`], which models the same `*args`
     /// construct when the unpacked value is an imported variable.
     StarExpansion(usize),
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
-pub struct CallData {
-    has_unsafe_args: bool,
-    unsafe_arg_indices: u64,
+/// The set of call arguments that carry an imported variable, plus the
+/// imprecision flags from `*args`/`**kwargs` expansion.
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Default, Serialize, Deserialize)]
+pub struct ImportedArgs {
+    /// Bitmask of positional arguments that are imported variables.
+    pub unsafe_arg_indices: u64,
     /// Names of keyword arguments that are imported variables.
-    unsafe_keyword_names: Vec<ModuleName>,
-    /// Set when a **kwargs expansion contains an imported variable,
-    /// meaning we can't determine which specific keywords are unsafe.
-    has_unsafe_kwargs_expansion: bool,
+    pub unsafe_keyword_names: Vec<ModuleName>,
+    /// Set when a `**kwargs` expansion contains an imported variable, meaning we
+    /// can't determine which specific keywords are unsafe.
+    pub has_unsafe_kwargs_expansion: bool,
     /// When a `*args` expansion contains an imported variable, the smallest
     /// positional index its elements can reach (the star's position). Positional
     /// indices at or above this are treated as unsafe. `None` means there is no
     /// unsafe `*args` expansion.
-    unsafe_args_expansion_min: Option<usize>,
-    /// Arguments that pass in one of the enclosing function's parameters:
-    /// `(slot the parameter is passed into, the enclosing parameter's name)`.
-    /// Used to track parameter forwarding, e.g.
-    ///   def f(y): g(y)  # => (ArgSlot::Positional(0), "y")
-    /// recording that the arg passed to `g` comes from f's parameter `y`
-    forwarded_params: Vec<(ArgSlot, ModuleName)>,
+    pub unsafe_args_expansion_min: Option<usize>,
 }
 
-impl CallData {
-    pub fn new(
-        has_unsafe_args: bool,
-        unsafe_arg_indices: u64,
-        unsafe_keyword_names: Vec<ModuleName>,
-        has_unsafe_kwargs_expansion: bool,
-    ) -> Self {
-        Self {
-            has_unsafe_args,
-            unsafe_arg_indices,
-            unsafe_keyword_names,
-            has_unsafe_kwargs_expansion,
-            unsafe_args_expansion_min: None,
-            forwarded_params: Vec::new(),
-        }
-    }
-
-    /// Builder setter: record that a `*args` expansion containing an imported
-    /// variable reaches positional indices at or above `min` (the star's
-    /// position). `None` leaves positional tracking precise.
-    pub fn with_args_expansion(mut self, min: Option<usize>) -> Self {
-        self.unsafe_args_expansion_min = min;
-        self
-    }
-
-    pub fn with_forwarded_params(mut self, forwarded_params: Vec<(ArgSlot, ModuleName)>) -> Self {
-        self.forwarded_params = forwarded_params;
-        self
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            has_unsafe_args: false,
-            unsafe_arg_indices: 0,
-            unsafe_keyword_names: Vec::new(),
-            has_unsafe_kwargs_expansion: false,
-            unsafe_args_expansion_min: None,
-            forwarded_params: Vec::new(),
-        }
-    }
-
-    pub fn forwarded_params(&self) -> &[(ArgSlot, ModuleName)] {
-        &self.forwarded_params
-    }
-
-    pub fn has_forwarded_params(&self) -> bool {
-        !self.forwarded_params.is_empty()
-    }
-
-    pub fn has_unsafe_args(&self) -> bool {
-        self.has_unsafe_args
-    }
-
+impl ImportedArgs {
     pub fn has_unsafe_arg_index(&self, idx: usize) -> bool {
         self.unsafe_args_expansion_min.is_some_and(|min| idx >= min)
             || (idx < 64 && (self.unsafe_arg_indices & (1u64 << idx)) != 0)
@@ -277,15 +221,133 @@ impl CallData {
         self.unsafe_args_expansion_min.is_none()
     }
 
-    pub fn has_unsafe_args_expansion(&self) -> bool {
-        self.unsafe_args_expansion_min.is_some()
-    }
-
     pub fn has_any_tracked_args(&self) -> bool {
         self.unsafe_arg_indices != 0
             || !self.unsafe_keyword_names.is_empty()
             || self.has_unsafe_kwargs_expansion
             || self.unsafe_args_expansion_min.is_some()
+    }
+
+    /// Whether an imported argument reaches the callee parameter `param_name`
+    /// (at positional index `param_idx`, when known), given the receiver `arg_offset`.
+    pub fn hits_param(
+        &self,
+        param_name: &str,
+        param_idx: Option<usize>,
+        arg_offset: usize,
+    ) -> bool {
+        // Positional: the parameter's index (minus the receiver offset) lands on
+        // an imported argument. With the *args lower bound in has_unsafe_arg_index,
+        // a resolved index yields an exact answer.
+        let resolved_idx = param_idx.and_then(|idx| idx.checked_sub(arg_offset));
+        if let Some(arg_idx) = resolved_idx {
+            if self.has_unsafe_arg_index(arg_idx) {
+                return true;
+            }
+        }
+        // Keyword: the parameter name matches an imported keyword argument
+        // (has_unsafe_keyword self-guards when there are none).
+        if self.has_unsafe_keyword(param_name) {
+            return true;
+        }
+        // Rule the parameter out only when BOTH keyword and positional tracking
+        // are precise; an imprecise *args expansion could still reach a positional
+        // slot we couldn't pinpoint.
+        if self.has_unsafe_keywords()
+            && self.has_precise_keyword_tracking()
+            && self.has_precise_arg_tracking()
+        {
+            return false;
+        }
+        // No argument could be pinpointed. Match conservatively only when the
+        // positional index couldn't be resolved and positional tracking was
+        // imprecise (a *args expansion at an unknown slot), or there is an unsafe
+        // arg we couldn't track at all (e.g. a positional index past the bitmask).
+        // A resolved index is already answered exactly above, so it must not be
+        // re-flagged here.
+        (resolved_idx.is_none() && !self.has_precise_arg_tracking()) || !self.has_any_tracked_args()
+    }
+
+    /// Whether an imported argument reaches any of the given callee parameters,
+    /// each a `(name, positional index when known)` pair, given the receiver
+    /// `arg_offset`.
+    pub fn hits_any_param<'a>(
+        &self,
+        params: impl IntoIterator<Item = (&'a str, Option<usize>)>,
+        arg_offset: usize,
+    ) -> bool {
+        params
+            .into_iter()
+            .any(|(name, param_idx)| self.hits_param(name, param_idx, arg_offset))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+pub struct CallData {
+    has_unsafe_args: bool,
+    imported_args: ImportedArgs,
+    /// Arguments that pass in one of the enclosing function's parameters:
+    /// `(slot the parameter is passed into, the enclosing parameter's name)`.
+    /// Used to track parameter forwarding, e.g.
+    ///   def f(y): g(y)  # => (ArgSlot::Positional(0), "y")
+    /// recording that the arg passed to `g` comes from f's parameter `y`
+    forwarded_params: Vec<(ArgSlot, ModuleName)>,
+}
+
+impl CallData {
+    pub fn new(
+        has_unsafe_args: bool,
+        unsafe_arg_indices: u64,
+        unsafe_keyword_names: Vec<ModuleName>,
+        has_unsafe_kwargs_expansion: bool,
+    ) -> Self {
+        Self {
+            has_unsafe_args,
+            imported_args: ImportedArgs {
+                unsafe_arg_indices,
+                unsafe_keyword_names,
+                has_unsafe_kwargs_expansion,
+                unsafe_args_expansion_min: None,
+            },
+            forwarded_params: Vec::new(),
+        }
+    }
+
+    /// Builder setter: record that a `*args` expansion containing an imported
+    /// variable reaches positional indices at or above `min` (the star's
+    /// position). `None` leaves positional tracking precise.
+    pub fn with_args_expansion(mut self, min: Option<usize>) -> Self {
+        self.imported_args.unsafe_args_expansion_min = min;
+        self
+    }
+
+    pub fn with_forwarded_params(mut self, forwarded_params: Vec<(ArgSlot, ModuleName)>) -> Self {
+        self.forwarded_params = forwarded_params;
+        self
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            has_unsafe_args: false,
+            imported_args: ImportedArgs::default(),
+            forwarded_params: Vec::new(),
+        }
+    }
+
+    pub fn forwarded_params(&self) -> &[(ArgSlot, ModuleName)] {
+        &self.forwarded_params
+    }
+
+    pub fn has_forwarded_params(&self) -> bool {
+        !self.forwarded_params.is_empty()
+    }
+
+    pub fn has_unsafe_args(&self) -> bool {
+        self.has_unsafe_args
+    }
+
+    pub fn imported_args(&self) -> &ImportedArgs {
+        &self.imported_args
     }
 }
 
@@ -503,47 +565,52 @@ mod tests {
     }
 
     #[test]
-    fn test_call_data_has_any_tracked_args() {
+    fn test_imported_args_has_any_tracked_args() {
         let empty = CallData::empty();
-        assert!(!empty.has_any_tracked_args());
+        assert!(!empty.imported_args().has_any_tracked_args());
 
         let with_indices = CallData::new(true, 1, Vec::new(), false);
-        assert!(with_indices.has_any_tracked_args());
+        assert!(with_indices.imported_args().has_any_tracked_args());
 
         let with_keywords = CallData::new(false, 0, vec![ModuleName::from_str("kwarg")], false);
-        assert!(with_keywords.has_any_tracked_args());
+        assert!(with_keywords.imported_args().has_any_tracked_args());
 
         let with_expansion = CallData::new(false, 0, Vec::new(), true);
-        assert!(with_expansion.has_any_tracked_args());
+        assert!(with_expansion.imported_args().has_any_tracked_args());
 
         let with_args_expansion =
             CallData::new(false, 0, Vec::new(), false).with_args_expansion(Some(0));
-        assert!(with_args_expansion.has_any_tracked_args());
-        assert!(with_args_expansion.has_unsafe_args_expansion());
-        assert!(!with_args_expansion.has_precise_arg_tracking());
+        let args = with_args_expansion.imported_args();
+        assert!(args.has_any_tracked_args());
+        assert!(args.unsafe_args_expansion_min.is_some());
+        assert!(!args.has_precise_arg_tracking());
         // The expansion's lower bound gates which positional indices are unsafe.
-        assert!(with_args_expansion.has_unsafe_arg_index(0));
+        assert!(args.has_unsafe_arg_index(0));
         let from_two = CallData::new(false, 0, Vec::new(), false).with_args_expansion(Some(2));
+        let from_two = from_two.imported_args();
         assert!(!from_two.has_unsafe_arg_index(1));
         assert!(from_two.has_unsafe_arg_index(2));
     }
 
     #[test]
-    fn test_call_data_has_unsafe_keyword() {
+    fn test_imported_args_has_unsafe_keyword() {
         let with_expansion = CallData::new(false, 0, Vec::new(), true);
-        assert!(with_expansion.has_unsafe_keyword("anything"));
-        assert!(with_expansion.has_unsafe_keywords());
-        assert!(!with_expansion.has_precise_keyword_tracking());
+        let args = with_expansion.imported_args();
+        assert!(args.has_unsafe_keyword("anything"));
+        assert!(args.has_unsafe_keywords());
+        assert!(!args.has_precise_keyword_tracking());
 
         let with_names = CallData::new(false, 0, vec![ModuleName::from_str("foo")], false);
-        assert!(with_names.has_unsafe_keyword("foo"));
-        assert!(!with_names.has_unsafe_keyword("bar"));
-        assert!(with_names.has_unsafe_keywords());
-        assert!(with_names.has_precise_keyword_tracking());
+        let args = with_names.imported_args();
+        assert!(args.has_unsafe_keyword("foo"));
+        assert!(!args.has_unsafe_keyword("bar"));
+        assert!(args.has_unsafe_keywords());
+        assert!(args.has_precise_keyword_tracking());
 
         let empty = CallData::empty();
-        assert!(!empty.has_unsafe_keyword("foo"));
-        assert!(!empty.has_unsafe_keywords());
+        let args = empty.imported_args();
+        assert!(!args.has_unsafe_keyword("foo"));
+        assert!(!args.has_unsafe_keywords());
     }
 
     #[test]

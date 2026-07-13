@@ -44,7 +44,6 @@ use crate::hasher::HashMapExt;
 use crate::hasher::HashSetExt;
 use crate::imports::ImportGraph;
 use crate::module_effects::ModuleImportsMap;
-use crate::module_info::DefinitionTable;
 use crate::module_parser::ParsedModule;
 pub use crate::module_safety::FunctionSafety;
 use crate::module_safety::FunctionSafetyInfo;
@@ -1584,56 +1583,6 @@ impl ProjectInfo {
         Ok(ret)
     }
 
-    /// Whether `call_data` passes an imported variable to the callee's parameter
-    /// `param_name`: either the imported arg is at that parameter's position or
-    /// keyword, or arg tracking was imprecise so we conservatively assume it is.
-    ///
-    /// `arg_offset` is the number of implicit leading parameters (the receiver)
-    /// to skip, so that explicit positional argument `i` matches parameter
-    /// `i + arg_offset` (e.g. 1 for a bound method or constructor's `self`).
-    fn mutated_param_receives_imported_arg(
-        call_data: &CallData,
-        callee: &ModuleName,
-        param_name: &str,
-        defs: Option<&DefinitionTable>,
-        arg_offset: usize,
-    ) -> bool {
-        // Positional args: does the mutated param's index (minus the receiver
-        // offset) match an unsafe arg? With the *args lower bound recorded in
-        // has_unsafe_arg_index, a resolved index yields an exact answer.
-        let mut positional_unresolved = true;
-        if let Some(param_idx) = defs.and_then(|d| d.get_param_index(callee, param_name)) {
-            if let Some(arg_idx) = param_idx.checked_sub(arg_offset) {
-                positional_unresolved = false;
-                if call_data.has_unsafe_arg_index(arg_idx) {
-                    return true;
-                }
-            }
-        }
-
-        // Keyword args: does the mutated param's name match an unsafe keyword?
-        if call_data.has_unsafe_keywords() {
-            if call_data.has_unsafe_keyword(param_name) {
-                return true;
-            }
-            // Only rule this parameter out when BOTH keyword and positional
-            // tracking are precise; an imprecise *args expansion could still reach
-            // a positional parameter we couldn't pinpoint.
-            if call_data.has_precise_keyword_tracking() && call_data.has_precise_arg_tracking() {
-                return false;
-            }
-        }
-
-        // No positional/keyword match could be pinpointed. Match conservatively
-        // only when the positional index couldn't be resolved and positional
-        // tracking was imprecise (an unsafe *args expansion at an unknown slot,
-        // mirroring the **kwargs handling above), or there is an unsafe arg we
-        // couldn't track at all. A resolved index is already answered exactly by
-        // has_unsafe_arg_index above, so it must not be re-flagged here.
-        (positional_unresolved && !call_data.has_precise_arg_tracking())
-            || !call_data.has_any_tracked_args()
-    }
-
     /// Whether `call_data` passes an imported variable into a (transitively)
     /// mutated parameter of `callee`, with explicit args starting at `arg_offset`.
     /// (Helper function for `call_mutates_imported_arg()` below.)
@@ -1651,15 +1600,13 @@ impl ProjectInfo {
             .analysis_map
             .get(&callee_module)
             .map(|m| &m.definitions);
-        mutated.iter().any(|param| {
-            Self::mutated_param_receives_imported_arg(
-                call_data,
-                callee,
-                param.as_str(),
-                defs,
-                arg_offset,
-            )
-        })
+        call_data.imported_args().hits_any_param(
+            mutated.iter().map(|param| {
+                let name = param.as_str();
+                (name, defs.and_then(|d| d.get_param_index(callee, name)))
+            }),
+            arg_offset,
+        )
     }
 
     /// Whether `call_effect` passes an imported variable to a parameter the callee
