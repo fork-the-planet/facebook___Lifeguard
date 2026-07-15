@@ -134,24 +134,6 @@ fn graph_edge_sets(graph: &ImportGraph, name: &ModuleName) -> GraphEdgeSets {
     }
 }
 
-/// The effect of resolving one mutation candidate against the merged verdicts.
-enum CandidateOutcome {
-    /// A confirmed module-scope call: record an `ImportedVarArgument` error on
-    /// `self.modules[module_idx]`.
-    ModuleError { module_idx: usize, metadata: String },
-    /// A confirmed in-function call: mark `func` hard `Unsafe`.
-    FuncUnsafe {
-        module: ModuleName,
-        func: ModuleName,
-    },
-    /// An unconfirmed in-function call: resolve `func`'s pending dep on `callee`.
-    FuncResolve {
-        module: ModuleName,
-        func: ModuleName,
-        callee: ModuleName,
-    },
-}
-
 impl LibraryCache {
     pub fn empty() -> Self {
         LibraryCache {
@@ -480,85 +462,63 @@ impl LibraryCache {
         module_names: &AHashSet<ModuleName>,
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
     ) -> bool {
-        let outcomes = self.classify_mutation_candidates(module_names, func_safety_by_module);
-        // Resolve unconfirmed candidates before applying hard-`Unsafe`, so a confirmed
-        // candidate on the same function still wins.
-        let resolved_to_safe =
-            resolve_unconfirmed_candidates(&outcomes, module_names, func_safety_by_module);
-        self.apply_confirmed_candidates(outcomes, func_safety_by_module);
-        resolved_to_safe
-    }
-
-    /// Classify each cached mutation candidate by whether its now-resolved callee
-    /// mutates the imported argument (see [`candidate_mutates`]).
-    fn classify_mutation_candidates(
-        &self,
-        module_names: &AHashSet<ModuleName>,
-        func_safety_by_module: &HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
-    ) -> Vec<CandidateOutcome> {
-        let mut outcomes = Vec::new();
-        for (module_idx, module) in self.modules.iter().enumerate() {
+        let mut resolved_to_safe = false;
+        for module in &mut self.modules {
+            let mut module_errors = Vec::new();
             for candidate in &module.mutation_candidates {
                 let confirmed = candidate_mutates(candidate, module_names, func_safety_by_module);
                 match (&candidate.site, confirmed) {
                     (MutationCandidateSite::ModuleScope { call }, true) => {
-                        outcomes.push(CandidateOutcome::ModuleError {
-                            module_idx,
-                            metadata: call.as_str().to_owned(),
-                        });
+                        module_errors.push(call.as_str().to_owned());
                     }
                     (MutationCandidateSite::ModuleScope { .. }, false) => {}
                     (MutationCandidateSite::Function { name }, true) => {
-                        outcomes.push(CandidateOutcome::FuncUnsafe {
-                            module: module.name,
-                            func: *name,
-                        });
+                        if let Some(info) = func_safety_by_module
+                            .get_mut(&module.name)
+                            .and_then(|fs| fs.get_mut(name.as_str()))
+                        {
+                            info.verdict = FunctionSafety::Unsafe;
+                        }
                     }
                     (MutationCandidateSite::Function { name }, false) => {
-                        outcomes.push(CandidateOutcome::FuncResolve {
-                            module: module.name,
-                            func: *name,
-                            callee: candidate.callee,
-                        });
+                        // A callee that resolved to a non-`Safe` verdict must keep its
+                        // caller unsafe even though it doesn't mutate the imported arg.
+                        // Leaving it in `missing_dep_callees` defers to the promotion
+                        // fixpoint's verified-safe check; only unresolved callees (treated
+                        // as safe, like the single-pass analyzer) or verified-safe callees
+                        // resolve here.
+                        if callee_resolves_unsafe(
+                            &candidate.callee,
+                            module_names,
+                            func_safety_by_module,
+                        ) {
+                            continue;
+                        }
+                        if let Some(info) = func_safety_by_module
+                            .get_mut(&module.name)
+                            .and_then(|fs| fs.get_mut(name.as_str()))
+                        {
+                            info.missing_dep_callees.remove(&candidate.callee);
+                            if info.verdict == FunctionSafety::UnsafeMissingDep
+                                && info.missing_dep_callees.is_empty()
+                            {
+                                info.verdict = FunctionSafety::Safe;
+                                resolved_to_safe = true;
+                            }
+                        }
                     }
                 }
             }
-        }
-        outcomes
-    }
-
-    /// Apply the confirmed candidates: an in-function callee that mutates makes its
-    /// caller hard `Unsafe`; a module-scope callee that mutates records an
-    /// `ImportedVarArgument` error on the module.
-    fn apply_confirmed_candidates(
-        &mut self,
-        outcomes: Vec<CandidateOutcome>,
-        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
-    ) {
-        for outcome in outcomes {
-            match outcome {
-                CandidateOutcome::FuncUnsafe { module, func } => {
-                    if let Some(info) = func_safety_by_module
-                        .get_mut(&module)
-                        .and_then(|fs| fs.get_mut(func.as_str()))
-                    {
-                        info.verdict = FunctionSafety::Unsafe;
-                    }
-                }
-                CandidateOutcome::ModuleError {
-                    module_idx,
-                    metadata,
-                } => {
-                    if let CachedSafety::Ok(ref mut safety) = self.modules[module_idx].safety {
-                        safety.errors.push(CachedError {
-                            kind: ErrorKind::ImportedVarArgument,
-                            metadata,
-                        });
-                    }
-                }
-                CandidateOutcome::FuncResolve { .. } => {}
+            if let CachedSafety::Ok(ref mut safety) = module.safety {
+                safety
+                    .errors
+                    .extend(module_errors.into_iter().map(|metadata| CachedError {
+                        kind: ErrorKind::ImportedVarArgument,
+                        metadata,
+                    }));
             }
         }
+        resolved_to_safe
     }
 
     /// Propagate function_safety entries through re-exports.
@@ -747,47 +707,6 @@ pub fn is_call_verified_safe(
         .filter_map(|r| func_safety_by_module.get(r))
         .filter_map(|fs| fs.get(func_name))
         .any(|info| info.verdict == FunctionSafety::Safe)
-}
-
-/// Resolve each unconfirmed in-function candidate: drop its callee from the
-/// caller's missing-dep set and promote a caller left with no other missing dep
-/// back to `Safe` (matching the single-pass treatment of an unresolved callee as
-/// safe). A callee that resolved to a non-`Safe` verdict is left in place, so the
-/// promotion fixpoint's verified-safe check keeps the caller unsafe instead of
-/// prematurely promoting it to `Safe`. Returns whether any function was resolved
-/// to `Safe`.
-fn resolve_unconfirmed_candidates(
-    outcomes: &[CandidateOutcome],
-    module_names: &AHashSet<ModuleName>,
-    func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
-) -> bool {
-    let mut resolved_to_safe = false;
-    for outcome in outcomes {
-        let CandidateOutcome::FuncResolve {
-            module,
-            func,
-            callee,
-        } = outcome
-        else {
-            continue;
-        };
-        if callee_resolves_unsafe(callee, module_names, func_safety_by_module) {
-            continue;
-        }
-        if let Some(info) = func_safety_by_module
-            .get_mut(module)
-            .and_then(|fs| fs.get_mut(func.as_str()))
-        {
-            info.missing_dep_callees.remove(callee);
-            if info.verdict == FunctionSafety::UnsafeMissingDep
-                && info.missing_dep_callees.is_empty()
-            {
-                info.verdict = FunctionSafety::Safe;
-                resolved_to_safe = true;
-            }
-        }
-    }
-    resolved_to_safe
 }
 
 /// Look up the cached safety info of a mutation candidate's callee, resolving its FQN
