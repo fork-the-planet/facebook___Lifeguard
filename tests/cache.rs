@@ -21,6 +21,7 @@ mod tests {
     use lifeguard::cache::is_call_verified_safe;
     use lifeguard::cache::resolve_implicit_imports;
     use lifeguard::config::AnalysisConfig;
+    use lifeguard::effects::ImportedArgs;
     use lifeguard::errors::ErrorKind;
     use lifeguard::errors::SafetyError;
     use lifeguard::exports::Exports;
@@ -30,6 +31,8 @@ mod tests {
     use lifeguard::module_safety::FunctionSafety;
     use lifeguard::module_safety::FunctionSafetyInfo;
     use lifeguard::module_safety::ModuleSafety;
+    use lifeguard::module_safety::MutationCandidate;
+    use lifeguard::module_safety::MutationCandidateSite;
     use lifeguard::module_safety::SafetyResult;
     use lifeguard::output::LifeGuardAnalysis;
     use lifeguard::project;
@@ -74,6 +77,7 @@ mod tests {
             ambiguous_imports: Default::default(),
             side_effect_imports: Default::default(),
             function_safety: HashMap::new(),
+            mutation_candidates: Vec::new(),
         }
     }
 
@@ -104,7 +108,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn test_cached_struct_sizes() {
         assert_eq!(std::mem::size_of::<LibraryCache>(), 120);
-        assert_eq!(std::mem::size_of::<CachedModule>(), 256);
+        assert_eq!(std::mem::size_of::<CachedModule>(), 280);
         assert_eq!(std::mem::size_of::<CachedSafety>(), 72);
         assert_eq!(std::mem::size_of::<CachedModuleSafety>(), 72);
         assert_eq!(std::mem::size_of::<lifeguard::cache::CachedError>(), 32);
@@ -367,6 +371,53 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_preserves_mutation_candidates() {
+        // When the same .py appears in more than one python_library, merging the
+        // duplicate copies must keep a mutation candidate recorded in only one of them,
+        // or the reduce step would never resolve that cross-library call.
+        let candidate = MutationCandidate {
+            callee: mn("dep.configure"),
+            site: MutationCandidateSite::Function { name: mn("f") },
+            arg_offset: 0,
+            imported_args: ImportedArgs {
+                unsafe_arg_indices: 1,
+                ..Default::default()
+            },
+        };
+
+        // Copy A of `dup` carries no mutation candidate.
+        let map_a = SafetyMap::new();
+        map_a.insert(mn("dup"), SafetyResult::Ok(ModuleSafety::new()));
+        let mut cache = LibraryCache::build(
+            &map_a,
+            &ImportGraph::new(),
+            &Exports::empty(),
+            &SideEffectMap::new(),
+        );
+
+        // Copy B of `dup` carries the mutation candidate.
+        let map_b = SafetyMap::new();
+        let mut safety_b = ModuleSafety::new();
+        safety_b.mutation_candidates.push(candidate.clone());
+        map_b.insert(mn("dup"), SafetyResult::Ok(safety_b));
+        let dep_cache = LibraryCache::build(
+            &map_b,
+            &ImportGraph::new(),
+            &Exports::empty(),
+            &SideEffectMap::new(),
+        );
+
+        cache.merge_dep_caches(vec![dep_cache]);
+
+        let dup = cache.modules.iter().find(|m| m.name == mn("dup")).unwrap();
+        assert_eq!(
+            dup.mutation_candidates,
+            vec![candidate],
+            "merge must preserve mutation candidates from a duplicate module copy",
+        );
+    }
+
+    #[test]
     fn test_own_build_plus_merge_matches_full_build() {
         let dep_modules: Vec<(&str, &str)> = vec![
             ("safe_module", "def greet(name): return f'Hello, {name}'\n"),
@@ -550,7 +601,7 @@ mod tests {
         // mutation -> `trigger` is hard Unsafe.
         //
         // This guards two things: (1) the "...if imported" qualifier propagates
-        // through a same-module intermediary rather than being discharged to Safe
+        // through a same-module intermediary rather than being resolved to Safe
         // (otherwise a cross-module caller further up is wrongly treated as safe),
         // and (2) each verdict depends only on module membership, not on which
         // entry point the analysis reached the function from first.
@@ -665,6 +716,75 @@ mod tests {
             Some(&Some(0)),
             "sink mutates parameter x at positional index 0; got {:?}",
             sink.mutated_params,
+        );
+    }
+
+    #[test]
+    fn test_cache_records_cross_library_mutation_candidate() {
+        // A call passing an imported object to a callee unresolved in this
+        // library is cached (and survives serialization) as a mutation candidate for the
+        // reduce step. `f` passes the imported module `other` to `sinklib.sink`,
+        // which is not in this library, so the map step cannot evaluate it.
+        let cache = round_trip(&build_cache(&TestSources::new(&[
+            ("other", "value = 1\n"),
+            (
+                "m",
+                "import other\n\
+                 from sinklib import sink\n\
+                 def f():\n\
+                 \x20   sink(other)\n",
+            ),
+        ])));
+
+        let m = cache.modules.iter().find(|x| x.name == mn("m")).unwrap();
+        let candidate = m
+            .mutation_candidates
+            .iter()
+            .find(|o| o.callee == mn("sinklib.sink"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a cross-library mutation candidate for sinklib.sink; got {:?}",
+                    m.mutation_candidates,
+                )
+            });
+        assert_eq!(
+            candidate.site,
+            MutationCandidateSite::Function { name: mn("f") },
+            "the call is in f's body"
+        );
+        assert_eq!(
+            candidate.arg_offset, 0,
+            "plain function call has no receiver offset"
+        );
+        assert!(
+            candidate.imported_args.unsafe_arg_indices & 1 != 0,
+            "the imported `other` is passed at positional index 0; got {:#b}",
+            candidate.imported_args.unsafe_arg_indices,
+        );
+    }
+
+    #[test]
+    fn test_cache_no_mutation_candidate_for_in_library_callee() {
+        // Negative case: when the callee is resolvable in this library, the map
+        // step handles it directly, so no mutation candidate is cached (avoids the reduce
+        // step double-counting).
+        let cache = build_cache(&TestSources::new(&[
+            ("other", "value = 1\n"),
+            (
+                "m",
+                "import other\n\
+                 def sink(x):\n\
+                 \x20   x.attr = 1\n\
+                 def f():\n\
+                 \x20   sink(other)\n",
+            ),
+        ]));
+
+        let m = cache.modules.iter().find(|x| x.name == mn("m")).unwrap();
+        assert!(
+            m.mutation_candidates.is_empty(),
+            "in-library sink is handled by the map step; got {:?}",
+            m.mutation_candidates,
         );
     }
 
@@ -806,6 +926,7 @@ mod tests {
                 "foo".to_string(),
                 FunctionSafetyInfo::new(FunctionSafety::Safe),
             )]),
+            mutation_candidates: Vec::new(),
         });
 
         cache.modules.push(CachedModule {
@@ -819,6 +940,7 @@ mod tests {
                 "foo".to_string(),
                 FunctionSafetyInfo::new(FunctionSafety::UnsafeMissingDep),
             )]),
+            mutation_candidates: Vec::new(),
         });
 
         cache.exports.re_exports.push(CachedReExport {

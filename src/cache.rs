@@ -29,6 +29,7 @@ use crate::imports::resolve_to_known_module;
 use crate::module_safety::FunctionSafety;
 use crate::module_safety::FunctionSafetyInfo;
 use crate::module_safety::ModuleSafety;
+use crate::module_safety::MutationCandidate;
 use crate::module_safety::SafetyResult;
 use crate::project::SafetyMap;
 use crate::project::SideEffectMap;
@@ -63,6 +64,9 @@ pub struct CachedModule {
     /// Per-function safety info from call graph analysis.
     /// Keys are function-local names (e.g., "helper" for `mod.helper`).
     pub function_safety: HashMap<String, FunctionSafetyInfo>,
+    /// Calls passing imported objects to cross-library-unresolved callees,
+    /// resolved against the merged cache in the reduce step.
+    pub mutation_candidates: Vec<MutationCandidate>,
 }
 
 /// Safety analysis result for a cached module.
@@ -166,9 +170,11 @@ impl LibraryCache {
                     .map(|s| s.iter().cloned().collect())
                     .unwrap_or_default();
 
-                let function_safety = match safety_result {
-                    SafetyResult::Ok(ms) => ms.function_safety.clone(),
-                    _ => HashMap::new(),
+                let (function_safety, mutation_candidates) = match safety_result {
+                    SafetyResult::Ok(ms) => {
+                        (ms.function_safety.clone(), ms.mutation_candidates.clone())
+                    }
+                    _ => (HashMap::new(), Vec::new()),
                 };
 
                 let safety = CachedSafety::from_safety_result(safety_result);
@@ -181,6 +187,7 @@ impl LibraryCache {
                     ambiguous_imports,
                     side_effect_imports: se_imports,
                     function_safety,
+                    mutation_candidates,
                 }
             })
             .collect();
@@ -695,6 +702,7 @@ impl CachedModule {
             ambiguous_imports: AHashSet::new(),
             side_effect_imports: AHashSet::new(),
             function_safety: HashMap::new(),
+            mutation_candidates: Vec::new(),
         }
     }
 
@@ -716,6 +724,8 @@ impl CachedModule {
                 .and_modify(|existing| existing.merge(info.clone()))
                 .or_insert(info);
         }
+        // Keep mutation candidates from every duplicate
+        self.mutation_candidates.extend(other.mutation_candidates);
     }
 }
 
@@ -906,6 +916,7 @@ mod tests {
                     ambiguous_imports: AHashSet::new(),
                     side_effect_imports: AHashSet::new(),
                     function_safety: HashMap::new(),
+                    mutation_candidates: Vec::new(),
                 },
                 CachedModule {
                     name: module_b,
@@ -922,6 +933,7 @@ mod tests {
                     ambiguous_imports: AHashSet::new(),
                     side_effect_imports: AHashSet::new(),
                     function_safety: HashMap::new(),
+                    mutation_candidates: Vec::new(),
                 },
             ],
             exports: CachedExports {

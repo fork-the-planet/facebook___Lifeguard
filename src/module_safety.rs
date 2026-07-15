@@ -11,6 +11,7 @@ use pyrefly_python::module_name::ModuleName;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::effects::ImportedArgs;
 use crate::errors::SafetyError;
 use crate::hasher::AHashMap;
 use crate::hasher::AHashSet;
@@ -79,6 +80,33 @@ impl FunctionSafetyInfo {
     }
 }
 
+/// Where a cross-library mutation candidate occurs, and how the reduce step
+/// applies it when the candidate is confirmed. The two cases are mutually exclusive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationCandidateSite {
+    /// A call at module scope. On confirmation, an `ImportedVarArgument` error is added to the
+    /// module. Carries the callee as written at the call site for the error metadata (the resolved
+    /// `callee` may differ, e.g. a constructor's `__init__`).
+    ModuleScope { call: ModuleName },
+    /// A call inside a function (its module-local name). On confirmation, that function's verdict
+    /// is upgraded to `Unsafe`, which propagates to its callers.
+    Function { name: ModuleName },
+}
+
+/// A module-scope or in-function call that passes an imported object to a callee
+/// that is unresolved in this library (a cross-library candidate).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationCandidate {
+    /// Resolved FQN of the callee (e.g. `setup.configure`).
+    pub callee: ModuleName,
+    /// Where the call occurs, and how a confirmed mutation candidate is applied.
+    pub site: MutationCandidateSite,
+    /// Receiver offset (implicit `self`/`cls`) for positional-arg matching.
+    pub arg_offset: usize,
+    /// The imported arguments passed at the call.
+    pub imported_args: ImportedArgs,
+}
+
 #[derive(Debug)]
 pub struct ModuleSafety {
     /// Errors that alter how a module should be imported (lazy/eager)
@@ -89,6 +117,8 @@ pub struct ModuleSafety {
     /// Per-function safety info from call graph analysis.
     /// Keys are function-local names (e.g., "helper" for `mod.helper`).
     pub function_safety: HashMap<String, FunctionSafetyInfo>,
+    /// Calls passing imported objects to cross-library-unresolved callees.
+    pub mutation_candidates: Vec<MutationCandidate>,
 }
 
 impl ModuleSafety {
@@ -98,6 +128,7 @@ impl ModuleSafety {
             force_imports_eager_overrides: Vec::new(),
             implicit_imports: Vec::new(),
             function_safety: HashMap::new(),
+            mutation_candidates: Vec::new(),
         }
     }
 

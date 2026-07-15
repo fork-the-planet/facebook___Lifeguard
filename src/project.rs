@@ -48,6 +48,8 @@ use crate::module_parser::ParsedModule;
 pub use crate::module_safety::FunctionSafety;
 use crate::module_safety::FunctionSafetyInfo;
 use crate::module_safety::ModuleSafety;
+use crate::module_safety::MutationCandidate;
+use crate::module_safety::MutationCandidateSite;
 use crate::module_safety::SafetyResult;
 use crate::source_map::AstResult;
 use crate::source_map::ModuleProvider;
@@ -233,6 +235,22 @@ fn get_all_safe_re_exports(effect_table: &EffectTable, re_exports: &mut AHashSet
     }
 }
 
+/// Resolve a scope FQN to its enclosing module and, when the scope is nested
+/// inside that module, the scope's module-local name. `is_module` identifies
+/// which names name a module. Returns `None` if no ancestor is a module.
+fn resolve_enclosing_module<'a>(
+    scope: &'a ModuleName,
+    is_module: impl Fn(&ModuleName) -> bool,
+) -> Option<(ModuleName, Option<&'a str>)> {
+    if is_module(scope) {
+        return Some((*scope, None));
+    }
+    scope
+        .iter_parents()
+        .find(|(parent, _)| is_module(parent))
+        .map(|(module, dot_pos)| (module, Some(&scope.as_str()[dot_pos + 1..])))
+}
+
 /// Collected output from the analysis pipeline.
 pub struct AnalysisOutput {
     pub safety_map: SafetyMap,
@@ -273,19 +291,20 @@ impl GlobalAnalysisState {
         if mode == ExecutionMode::Incremental {
             self.function_safety.par_iter().for_each(|entry| {
                 let fqn = entry.key();
-                for (parent, dot_pos) in fqn.iter_parents() {
-                    if let Some(mut safety_entry) = self.safety_map.get_mut(&parent) {
-                        if let SafetyResult::Ok(module_safety) = safety_entry.value_mut() {
-                            let local_name = &fqn.as_str()[dot_pos + 1..];
-                            let mut info = entry.value().clone();
-                            if let Some(mutated) = mutated_params.get(fqn) {
-                                info.mutated_params = mutated.clone();
-                            }
-                            module_safety
-                                .function_safety
-                                .insert(local_name.to_string(), info);
+                let Some((module, Some(local_name))) =
+                    resolve_enclosing_module(fqn, |p| self.safety_map.contains_key(p))
+                else {
+                    return;
+                };
+                if let Some(mut safety_entry) = self.safety_map.get_mut(&module) {
+                    if let SafetyResult::Ok(module_safety) = safety_entry.value_mut() {
+                        let mut info = entry.value().clone();
+                        if let Some(mutated) = mutated_params.get(fqn) {
+                            info.mutated_params = mutated.clone();
                         }
-                        break;
+                        module_safety
+                            .function_safety
+                            .insert(local_name.to_string(), info);
                     }
                 }
             });
@@ -1235,7 +1254,77 @@ impl ProjectInfo {
         } else {
             AHashMap::new()
         };
-        state.into_safety_map(mode, &mutated_params)
+        let safety_map = state.into_safety_map(mode, &mutated_params);
+
+        if mode == ExecutionMode::Incremental {
+            for (module, candidates) in self.collect_mutation_candidates() {
+                if let Some(mut entry) = safety_map.get_mut(&module) {
+                    if let SafetyResult::Ok(ms) = entry.value_mut() {
+                        ms.mutation_candidates = candidates;
+                    }
+                }
+            }
+        }
+        safety_map
+    }
+
+    /// Collect calls that pass an imported object to a callee unresolved in this library (a
+    /// cross-library candidate), grouped by the caller's module.
+    /// Callees resolvable in this library are skipped; the map step already handled them via
+    /// `call_mutates_imported_arg`.
+    fn collect_mutation_candidates(&self) -> AHashMap<ModuleName, Vec<MutationCandidate>> {
+        let flat: Vec<(ModuleName, MutationCandidate)> = self
+            .effect_table
+            .par_iter()
+            .fold(Vec::new, |mut acc, (scope, effs)| {
+                let Some((module, local)) =
+                    resolve_enclosing_module(scope, |p| self.analysis_map.contains_key(p))
+                else {
+                    return acc;
+                };
+                let caller_function = local.map(ModuleName::from_str);
+
+                for eff in effs {
+                    let EffectData::Call(ref call_data) = eff.data else {
+                        continue;
+                    };
+                    if !call_data.has_unsafe_args() {
+                        continue;
+                    }
+                    for (callee, arg_offset) in iter_callees(eff, &self.classes) {
+                        // Resolvable in this library -> already handled by the map step.
+                        if self.functions.contains_key(&callee)
+                            || self.mutated_params.contains_key(&callee)
+                        {
+                            continue;
+                        }
+                        let site = match &caller_function {
+                            Some(name) => MutationCandidateSite::Function { name: *name },
+                            None => MutationCandidateSite::ModuleScope { call: eff.name },
+                        };
+                        acc.push((
+                            module,
+                            MutationCandidate {
+                                callee,
+                                site,
+                                arg_offset,
+                                imported_args: call_data.imported_args().clone(),
+                            },
+                        ));
+                    }
+                }
+                acc
+            })
+            .reduce(Vec::new, |mut a, mut b| {
+                a.append(&mut b);
+                a
+            });
+
+        let mut result: AHashMap<ModuleName, Vec<MutationCandidate>> = AHashMap::new();
+        for (module, candidate) in flat {
+            result.entry(module).or_default().push(candidate);
+        }
+        result
     }
 
     /// Resolve each mutated parameter to its positional index using the callee's
