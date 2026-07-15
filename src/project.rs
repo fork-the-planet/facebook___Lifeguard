@@ -1555,7 +1555,26 @@ impl ProjectInfo {
         callee: &Call,
         state: &GlobalAnalysisState,
     ) {
-        if self.can_resolve_call(callee, state) {
+        // A callee that is only recoverably unsafe (an unresolved/missing dep,
+        // including a deferred cross-library mutation) makes the caller
+        // recoverably unsafe too, even when the callee is resolvable in this
+        // library. Marking the caller hard-`Unsafe` here would strand it if the
+        // callee is later promoted/resolved at reduce time.
+        //
+        // This precompute verdict is provisional: reads of a callee's snapshot may
+        // race a concurrent thread's intermediate `UnsafeMissingDep`. That cannot
+        // cause a false-safe because reduce re-checks final verdicts — the recorded
+        // callee, if finally unsafe, blocks promotion (`is_call_verified_safe`) and
+        // blocks resolution (`callee_resolves_unsafe`).
+        let callee_recoverable = state
+            .function_safety
+            .get(&callee.func)
+            .is_some_and(|info| info.verdict == FunctionSafety::UnsafeMissingDep);
+        if callee_recoverable {
+            if !state.is_unsafe(func) {
+                state.mark_unsafe_missing_dep(func, &callee.func);
+            }
+        } else if self.can_resolve_call(callee, state) {
             state.mark_unsafe(func);
         } else if !state.is_unsafe(func) {
             state.mark_unsafe_missing_dep(func, &callee.func);
@@ -1711,6 +1730,13 @@ impl ProjectInfo {
             .any(|(callee, offset)| self.callee_mutates_imported_arg(call_data, &callee, offset))
     }
 
+    /// Whether `call_effect` is a call that passes an imported variable as an
+    /// argument. Such a call must be deferred to the reduce step when its callee
+    /// is unresolved in this library (the callee may mutate the argument).
+    fn defers_cross_library_mutation(&self, call_effect: &Effect) -> bool {
+        matches!(call_effect.data, EffectData::Call(ref cd) if cd.has_unsafe_args())
+    }
+
     fn check_call_params(&self, call: &Call, state: &GlobalAnalysisState) {
         if self.call_mutates_imported_arg(call.effect) {
             let err = SafetyError::new_from_effect(ErrorKind::ImportedVarArgument, call.effect);
@@ -1758,6 +1784,20 @@ impl ProjectInfo {
                     if self.call_mutates_imported_arg(eff) {
                         state.mark_unsafe(&func);
                         ret = false;
+                    } else if !call.is_module_scope {
+                        // Precompute pass only: a call passing an imported object to a callee
+                        // unresolved in this library may mutate it, but we can't tell here.
+                        // This propagates a recoverable error that the reduce phase resolves.
+                        if self.defers_cross_library_mutation(eff) {
+                            for (callee, _) in iter_callees(eff, &self.classes) {
+                                if !self.functions.contains_key(&callee)
+                                    && !self.mutated_params.contains_key(&callee)
+                                {
+                                    state.mark_unsafe_missing_dep(&func, &callee);
+                                    ret = false;
+                                }
+                            }
+                        }
                     }
                     if call.stack.contains(&eff.name) {
                         // We have a recursive function call; mark it unsafe

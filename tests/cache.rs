@@ -548,6 +548,43 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_library_constructor_mutates_imported_arg_is_unsafe() {
+        // A cross-library class whose constructor mutates a passed-in parameter is
+        // safe in isolation, but `caller` passes imported state into it at import,
+        // so `caller` must stay unsafe. The class FQN is unresolved in the consuming
+        // library, so the mutation candidate records the class, not `__init__`.
+        let dep_cache = build_cache(&TestSources::new(&[(
+            "dep",
+            "class MyClass:\n\
+             \x20   def __init__(self, x):\n\
+             \x20       x.attr = 1\n",
+        )]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("config", "settings = 1\n"),
+            (
+                "caller",
+                "from dep import MyClass\n\
+                 from config import settings\n\
+                 instance = MyClass(settings)\n",
+            ),
+        ]));
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let caller = own_cache
+            .modules
+            .iter()
+            .find(|m| m.name == mn("caller"))
+            .unwrap();
+        assert!(
+            !caller.is_safe(),
+            "constructor mutates the imported arg, so caller must stay unsafe",
+        );
+    }
+
+    #[test]
     fn test_resolve_cross_library_unsafe_if_imported_constructor() {
         let dep_cache = build_cache(&TestSources::new(&[(
             "defs",
@@ -789,21 +826,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known cross-library param-mutation gap (false-safe)"]
     fn test_cross_library_param_mutation_is_unsafe() {
         // Cross-library counterpart of test_param_mutation_through_function_is_unsafe.
         // `sink` lives in a dependency library; `other`/`m`/`app` live in the
         // consuming library. `m.f` passes the imported module `other` to the
         // cross-library `sink`, which mutates it, so importing `app` runs that
         // mutation at module scope -> `app` must be unsafe.
-        //
-        // Single-pass analysis catches this; the incremental (map-reduce) path
-        // currently does NOT. `sink`'s mutated-parameter summary is not carried
-        // in the library cache, so at reduce time the call into `sink` looks
-        // benign, and resolve_cross_library_errors can only relax verdicts, never
-        // add the missed failure. The result is a false-safe: `app` is wrongly
-        // judged eligible for lazy import. Verified end-to-end via the analyzer
-        // CLI (analyze vs analyze-library + analyze-binary).
         let dep_cache = build_cache(&TestSources::new(&[(
             "sinklib",
             "def sink(x):\n\
@@ -848,6 +876,192 @@ mod tests {
         assert!(
             !app.is_safe(),
             "app calls f at import time, so importing app runs the cross-library mutation",
+        );
+    }
+
+    #[test]
+    fn test_cross_library_module_scope_mutation_is_unsafe() {
+        // Module-scope counterpart: `main` calls the cross-library `configure`
+        // directly at import time, passing the imported `settings`. The reduce
+        // step must add an ImportedVarArgument error to `main`.
+        let dep_cache = build_cache(&TestSources::new(&[(
+            "setup",
+            "def configure(x):\n\
+             \x20   x.enabled = True\n",
+        )]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("config", "settings = 1\n"),
+            (
+                "main",
+                "from setup import configure\n\
+                 from config import settings\n\
+                 configure(settings)\n",
+            ),
+        ]));
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let main = own_cache
+            .modules
+            .iter()
+            .find(|x| x.name == mn("main"))
+            .unwrap();
+        assert!(
+            !main.is_safe(),
+            "main mutates the imported `settings` via cross-library `configure` at import time",
+        );
+    }
+
+    #[test]
+    fn test_cross_library_non_mutating_callee_stays_safe() {
+        // Unconfirmed direction (parity preservation): the cross-library callee does
+        // NOT mutate its parameter, so the deferred pessimism must be resolved
+        // and `main` must end up safe — matching single-pass analysis.
+        let dep_cache = build_cache(&TestSources::new(&[(
+            "setup",
+            "def configure(x):\n\
+             \x20   return x\n",
+        )]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("config", "settings = 1\n"),
+            (
+                "main",
+                "from setup import configure\n\
+                 from config import settings\n\
+                 configure(settings)\n",
+            ),
+        ]));
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let main = own_cache
+            .modules
+            .iter()
+            .find(|x| x.name == mn("main"))
+            .unwrap();
+        assert!(
+            main.is_safe(),
+            "configure does not mutate its parameter, so main is safe to lazily import",
+        );
+    }
+
+    #[test]
+    fn test_cross_library_wrapper_non_mutating_stays_safe() {
+        // One-level wrapper: `g` (a function) makes the cross-library call and is
+        // resolved to Safe; `main` calls `g` at module scope. The resolution must
+        // also clear `main`'s deferred error even though the promotion fixpoint
+        // promotes nothing.
+        let dep_cache = build_cache(&TestSources::new(&[(
+            "setup",
+            "def configure(x):\n\
+             \x20   return x\n",
+        )]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("config", "settings = 1\n"),
+            (
+                "lib",
+                "from setup import configure\n\
+                 from config import settings\n\
+                 def g():\n\
+                 \x20   configure(settings)\n",
+            ),
+            ("main", "from lib import g\ng()\n"),
+        ]));
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let main = own_cache
+            .modules
+            .iter()
+            .find(|x| x.name == mn("main"))
+            .unwrap();
+        assert!(
+            main.is_safe(),
+            "g's cross-library callee does not mutate, so main must be safe",
+        );
+    }
+
+    #[test]
+    fn test_cross_library_deep_wrapper_non_mutating_stays_safe() {
+        // Multi-level wrapper: main -> f() -> g() -> configure(imported),
+        // configure is non-mutating cross-library.
+        // All of f/g must end Safe and main must be cleared.
+        let dep_cache = build_cache(&TestSources::new(&[(
+            "setup",
+            "def configure(x):\n\
+             \x20   return x\n",
+        )]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("config", "settings = 1\n"),
+            (
+                "lib",
+                "from setup import configure\n\
+                 from config import settings\n\
+                 def g():\n\
+                 \x20   configure(settings)\n\
+                 def f():\n\
+                 \x20   g()\n",
+            ),
+            ("main", "from lib import f\nf()\n"),
+        ]));
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let main = own_cache
+            .modules
+            .iter()
+            .find(|x| x.name == mn("main"))
+            .unwrap();
+        assert!(
+            main.is_safe(),
+            "the whole chain is non-mutating, so main must be safe",
+        );
+    }
+
+    #[test]
+    fn test_cross_library_wrapper_unsafe_callee_stays_unsafe() {
+        // `g` passes an imported object to a cross-library callee that resolves as
+        // Unsafe (recursive) but does not mutate the imported arg. The unconfirmed
+        // mutation candidate must NOT resolve `g`'s missing dep on that unsafe
+        // callee, or `g` — and `main`, which runs it at import — would be wrongly
+        // promoted to Safe.
+        let dep_cache = build_cache(&TestSources::new(&[(
+            "setup",
+            "def configure(x):\n\
+             \x20   configure(x)\n",
+        )]));
+
+        let mut own_cache = build_cache(&TestSources::new(&[
+            ("config", "settings = 1\n"),
+            (
+                "lib",
+                "from setup import configure\n\
+                 from config import settings\n\
+                 def g():\n\
+                 \x20   configure(settings)\n",
+            ),
+            ("main", "from lib import g\ng()\n"),
+        ]));
+
+        own_cache.merge_dep_caches(vec![dep_cache]);
+        own_cache.resolve_cross_library_errors();
+
+        let main = own_cache
+            .modules
+            .iter()
+            .find(|x| x.name == mn("main"))
+            .unwrap();
+        assert!(
+            !main.is_safe(),
+            "g's cross-library callee resolves unsafe, so main must stay unsafe",
         );
     }
 
