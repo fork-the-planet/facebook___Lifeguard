@@ -25,9 +25,8 @@ use tracing::warn;
 use crate::analyzer;
 use crate::analyzer::AnalyzedModule;
 use crate::cache::apply_mutation_candidates;
-use crate::cache::can_promote_missing_dep_function;
 use crate::cache::get_function_safety;
-use crate::cache::get_function_safety_mut;
+use crate::cache::promote_fixpoint;
 use crate::class::Class;
 use crate::class::ClassTable;
 use crate::class::FieldKind;
@@ -1372,44 +1371,8 @@ impl ProjectInfo {
         );
 
         // Promotion fixpoint: a callee promoted to Safe can unblock its callers.
-        let mut globally_safe_funcs: AHashSet<String> = view
-            .iter()
-            .filter(|(m, _)| module_names.contains(m))
-            .flat_map(|(_, fs)| fs.iter())
-            .filter(|(_, info)| info.verdict == FunctionSafety::Safe)
-            .map(|(name, _)| name.clone())
-            .collect();
-        loop {
-            let to_promote: Vec<(ModuleName, String)> = {
-                let view_ref = &view;
-                let globally_safe_funcs = &globally_safe_funcs;
-                view_ref
-                    .par_iter()
-                    .flat_map_iter(|(m, fs)| {
-                        fs.iter()
-                            .filter(|(_, info)| {
-                                can_promote_missing_dep_function(
-                                    info,
-                                    &module_names,
-                                    view_ref,
-                                    globally_safe_funcs,
-                                )
-                            })
-                            .map(move |(name, _)| (*m, name.clone()))
-                    })
-                    .collect()
-            };
-            if to_promote.is_empty() {
-                break;
-            }
-            for (m, name) in to_promote {
-                if let Some(info) = get_function_safety_mut(&mut view, &m, &name) {
-                    info.verdict = FunctionSafety::Safe;
-                    globally_safe_funcs.insert(name.clone());
-                    changed.insert((m, name));
-                }
-            }
-        }
+        let (promoted, _globally_safe_funcs) = promote_fixpoint(&module_names, &mut view);
+        changed.extend(promoted);
 
         // Write back only changed verdicts so the module-scope pass reads them.
         for (module, local) in &changed {

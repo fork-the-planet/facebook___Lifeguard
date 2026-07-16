@@ -284,82 +284,14 @@ impl LibraryCache {
         func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
         clear_errors: bool,
     ) {
-        // Index of globally safe function names for O(1) unqualified lookups.
-        // Only include functions from modules in `module_names` to match
-        // `is_call_verified_safe`'s unqualified fallback.
-        let mut globally_safe_funcs: AHashSet<String> = func_safety_by_module
-            .iter()
-            .filter(|(module, _)| module_names.contains(module))
-            .flat_map(|(_, fs)| fs.iter())
-            .filter(|(_, info)| info.verdict == FunctionSafety::Safe)
-            .map(|(name, _)| name.clone())
-            .collect();
-
-        // Promote to a fixpoint: one promotion can unblock a caller next round.
-        let mut num_promoted = 0;
-        while self.promote_resolved_module_functions(
-            module_names,
-            func_safety_by_module,
-            &mut globally_safe_funcs,
-        ) {
-            num_promoted += 1;
-        }
+        let (promoted, globally_safe_funcs) = promote_fixpoint(module_names, func_safety_by_module);
         // Clear errors only with positive evidence: a promotion, or a function resolved to `Safe`
         // by mutation-candidate resolution (the promotion fixpoint does not count this, but it can
         // still leave a stale error on a module-scope caller of the resolved function).
-        if num_promoted > 0 || clear_errors {
+        if !promoted.is_empty() || clear_errors {
             self.clear_verified_errors(module_names, func_safety_by_module, &globally_safe_funcs);
         }
-        debug!("{} promotion iterations were made", num_promoted);
-    }
-
-    /// Promote an `UnsafeMissingDep` verdict to `Safe` only when every callee
-    /// that caused it now resolves to a `Safe` function, so a missing dep that
-    /// resolves to an *unsafe* function keeps the caller unsafe. Promoted names
-    /// are recorded in `globally_safe_funcs`. Returns whether any verdict changed.
-    fn promote_resolved_module_functions(
-        &self,
-        module_names: &AHashSet<ModuleName>,
-        func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
-        globally_safe_funcs: &mut AHashSet<String>,
-    ) -> bool {
-        let to_promote: Vec<(ModuleName, String)> = {
-            // Reborrow as shared for parallel access.
-            let func_safety_by_module = &*func_safety_by_module;
-            let globally_safe_funcs = &*globally_safe_funcs;
-
-            self.modules
-                .par_iter()
-                .filter_map(|module| {
-                    func_safety_by_module
-                        .get(&module.name)
-                        .map(|fs| (module.name, fs))
-                })
-                .flat_map_iter(|(name, fs)| {
-                    fs.iter()
-                        .filter(move |(_, info)| {
-                            can_promote_missing_dep_function(
-                                info,
-                                module_names,
-                                func_safety_by_module,
-                                globally_safe_funcs,
-                            )
-                        })
-                        .map(move |(func_name, _)| (name, func_name.clone()))
-                })
-                .collect()
-        };
-
-        let promoted = !to_promote.is_empty();
-        for (module_name, func_name) in to_promote {
-            if let Some(info) =
-                get_function_safety_mut(func_safety_by_module, &module_name, &func_name)
-            {
-                info.verdict = FunctionSafety::Safe;
-                globally_safe_funcs.insert(func_name);
-            }
-        }
-        promoted
+        debug!("{} functions promoted", promoted.len());
     }
 
     /// Drop errors that the current per-function verdicts now verify as safe,
@@ -822,6 +754,63 @@ fn callee_resolves_unsafe(
 ) -> bool {
     lookup_callee_info(callee, module_names, func_safety_by_module)
         .is_some_and(|info| info.verdict != FunctionSafety::Safe)
+}
+
+/// Promote every `UnsafeMissingDep` function whose missing-dep callees now all resolve to `Safe`,
+/// iterating to a fixpoint (one promotion can unblock a caller the next round).
+///
+/// Returns the promoted functions as `(module, local-name)` pairs, as well as the
+/// globally-safe-name index.
+pub(crate) fn promote_fixpoint(
+    module_names: &AHashSet<ModuleName>,
+    func_safety_by_module: &mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+) -> (Vec<(ModuleName, String)>, AHashSet<String>) {
+    // Index of globally safe function names. Only include functions from modules in `module_names`,
+    // to match `is_call_verified_safe`'s unqualified fallback.
+    let mut globally_safe_funcs: AHashSet<String> = func_safety_by_module
+        .iter()
+        .filter(|(module, _)| module_names.contains(module))
+        .flat_map(|(_, fs)| fs.iter())
+        .filter(|(_, info)| info.verdict == FunctionSafety::Safe)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut all_promoted: Vec<(ModuleName, String)> = Vec::new();
+    loop {
+        let to_promote: Vec<(ModuleName, String)> = {
+            // Reborrow as shared for parallel access.
+            let func_safety_by_module = &*func_safety_by_module;
+            let globally_safe_funcs = &globally_safe_funcs;
+            func_safety_by_module
+                .par_iter()
+                .flat_map_iter(|(module, fs)| {
+                    fs.iter()
+                        .filter(move |(_, info)| {
+                            can_promote_missing_dep_function(
+                                info,
+                                module_names,
+                                func_safety_by_module,
+                                globally_safe_funcs,
+                            )
+                        })
+                        .map(move |(func_name, _)| (*module, func_name.clone()))
+                })
+                .collect()
+        };
+        if to_promote.is_empty() {
+            break;
+        }
+        for (module_name, func_name) in &to_promote {
+            if let Some(info) =
+                get_function_safety_mut(func_safety_by_module, module_name, func_name)
+            {
+                info.verdict = FunctionSafety::Safe;
+                globally_safe_funcs.insert(func_name.clone());
+            }
+        }
+        all_promoted.extend(to_promote);
+    }
+    (all_promoted, globally_safe_funcs)
 }
 
 pub(crate) fn can_promote_missing_dep_function(
