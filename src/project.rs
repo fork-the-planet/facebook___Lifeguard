@@ -24,6 +24,8 @@ use tracing::warn;
 
 use crate::analyzer;
 use crate::analyzer::AnalyzedModule;
+use crate::cache::apply_mutation_candidates;
+use crate::cache::can_promote_missing_dep_function;
 use crate::class::Class;
 use crate::class::ClassTable;
 use crate::class::FieldKind;
@@ -1243,15 +1245,22 @@ impl ProjectInfo {
         // Determinism fix: compute all function/constructor safety verdicts up
         // front, BEFORE the module-scope error pass, so that pass only ever reads
         // a complete, order-independent verdict cache.
-        if mode == ExecutionMode::Incremental {
-            time("    Marking recursive functions", || {
-                self.mark_recursive_functions_unsafe(&state)
-            });
-            time("    Precompute constructor safety", || {
-                self.precompute_constructor_safety(&state)
-            });
-            time("    Precompute function safety", || {
-                self.precompute_function_safety(&state)
+        time("    Marking recursive functions", || {
+            self.mark_recursive_functions_unsafe(&state)
+        });
+        time("    Precompute constructor safety", || {
+            self.precompute_constructor_safety(&state)
+        });
+        time("    Precompute function safety", || {
+            self.precompute_function_safety(&state)
+        });
+
+        // Single-pass resolution: resolve recoverable `UnsafeMissingDep` verdicts
+        // in-process (the incremental path does this at reduce time) so the
+        // module-scope error pass below reads resolved verdicts directly.
+        if mode == ExecutionMode::WholeProgram {
+            time("    Resolve mutation candidates", || {
+                self.resolve_whole_program(&state, import_graph)
             });
         }
 
@@ -1290,6 +1299,125 @@ impl ProjectInfo {
             }
         }
         safety_map
+    }
+
+    /// Single-pass (whole-program) resolution of recoverable `UnsafeMissingDep`
+    /// verdicts, mirroring the incremental reduce in-process. Runs after the
+    /// function-safety precompute and before the module-scope error pass, so that
+    /// pass publishes errors against resolved verdicts (no error clearing needed).
+    fn resolve_whole_program(&self, state: &GlobalAnalysisState, import_graph: &ImportGraph) {
+        // Build the module -> local-name -> info view the shared resolution helpers
+        // expect. Assembled in parallel (fold per thread, then merge); a flat
+        // fqn-keyed map would build faster but can't reproduce the helpers' callee
+        // resolution (class-prefix proxy + unqualified fallback + module gating).
+        // `mutated_params` are cloned but go unused: in a whole-program run a
+        // mutation candidate's callee is always unresolved, so it is never confirmed
+        // and the promotion fixpoint only reads verdicts.
+        let mut view: HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>> = state
+            .function_safety
+            .par_iter()
+            .filter_map(|entry| {
+                let fqn = entry.key();
+                fqn.iter_parents().find_map(|(parent, dot_pos)| {
+                    self.analysis_map.contains_key(&parent).then(|| {
+                        (
+                            parent,
+                            fqn.as_str()[dot_pos + 1..].to_owned(),
+                            entry.value().clone(),
+                        )
+                    })
+                })
+            })
+            .fold(
+                HashMap::<ModuleName, HashMap<String, FunctionSafetyInfo>>::new,
+                |mut acc, (module, local, info)| {
+                    acc.entry(module).or_default().insert(local, info);
+                    acc
+                },
+            )
+            .reduce(HashMap::new, |mut a, b| {
+                for (module, inner) in b {
+                    a.entry(module).or_default().extend(inner);
+                }
+                a
+            });
+
+        let module_names: AHashSet<ModuleName> = self.analysis_map.keys().copied().collect();
+
+        // Functions whose verdict the resolution may change: mutation-candidate call
+        // sites plus everything the promotion fixpoint promotes. Only these are
+        // written back (re-deriving the fqn), avoiding a full-table rewrite.
+        let mut changed: AHashSet<(ModuleName, String)> = AHashSet::new();
+
+        let candidates = self.collect_mutation_candidates(import_graph);
+        for (module, module_candidates) in &candidates {
+            for candidate in module_candidates {
+                if let MutationCandidateSite::Function { name } = &candidate.site {
+                    changed.insert((*module, name.as_str().to_owned()));
+                }
+            }
+        }
+
+        // Whole-program: every candidate callee is unresolved, so none are confirmed —
+        // each drops from its caller's missing-dep set, promoting callers left with no
+        // missing dep to Safe. Module-scope mutations cannot be confirmed (sink unused);
+        // module-scope imported-arg mutations are caught by the module-scope pass.
+        apply_mutation_candidates(
+            candidates.iter().map(|(m, v)| (*m, v.as_slice())),
+            &module_names,
+            &mut view,
+            |_module, _metadata| {},
+        );
+
+        // Promotion fixpoint: a callee promoted to Safe can unblock its callers.
+        let mut globally_safe_funcs: AHashSet<String> = view
+            .iter()
+            .filter(|(m, _)| module_names.contains(m))
+            .flat_map(|(_, fs)| fs.iter())
+            .filter(|(_, info)| info.verdict == FunctionSafety::Safe)
+            .map(|(name, _)| name.clone())
+            .collect();
+        loop {
+            let to_promote: Vec<(ModuleName, String)> = {
+                let view_ref = &view;
+                let globally_safe_funcs = &globally_safe_funcs;
+                view_ref
+                    .par_iter()
+                    .flat_map_iter(|(m, fs)| {
+                        fs.iter()
+                            .filter(|(_, info)| {
+                                can_promote_missing_dep_function(
+                                    info,
+                                    &module_names,
+                                    view_ref,
+                                    globally_safe_funcs,
+                                )
+                            })
+                            .map(move |(name, _)| (*m, name.clone()))
+                    })
+                    .collect()
+            };
+            if to_promote.is_empty() {
+                break;
+            }
+            for (m, name) in to_promote {
+                if let Some(info) = view.get_mut(&m).and_then(|fs| fs.get_mut(&name)) {
+                    info.verdict = FunctionSafety::Safe;
+                    globally_safe_funcs.insert(name.clone());
+                    changed.insert((m, name));
+                }
+            }
+        }
+
+        // Write back only changed verdicts so the module-scope pass reads them.
+        for (module, local) in &changed {
+            let fqn = ModuleName::from_str(&format!("{}.{}", module.as_str(), local));
+            if let Some(mut entry) = state.function_safety.get_mut(&fqn) {
+                if let Some(info) = view.get(module).and_then(|fs| fs.get(local)) {
+                    entry.verdict = info.verdict;
+                }
+            }
+        }
     }
 
     /// Collect calls that pass an imported object to a callee unresolved in this library (a
