@@ -95,6 +95,15 @@ impl Alias {
 type Bindings = AHashMap<Name, Value>;
 type Aliases = AHashMap<Name, Alias>;
 
+/// Look up a name in a nested scope map.
+fn get_nested<'a, V>(
+    map: &'a AHashMap<ModuleName, AHashMap<Name, V>>,
+    scope: &ModuleName,
+    name: &Name,
+) -> Option<&'a V> {
+    map.get(scope)?.get(name)
+}
+
 /// Follow a chain of local aliases (`z = y; y = x`) to its terminal binding.
 /// Track visited nodes to guard against infinite loops, since we can get confused by control flow.
 fn resolve_alias<'a>(
@@ -113,10 +122,7 @@ fn resolve_alias<'a>(
             // Cycle detected — return last valid alias to preserve old behavior.
             return last_ret;
         }
-        let ret = match aliases
-            .get(&current_scope)
-            .and_then(|a| a.get(current_name))
-        {
+        let ret = match get_nested(aliases, &current_scope, current_name) {
             Some(r) => r,
             None => return last_ret,
         };
@@ -152,11 +158,11 @@ impl BindingsTable {
     }
 
     pub fn lookup(&self, scope: &ModuleName, name: &Name) -> Option<&Value> {
-        self.bindings.get(scope)?.get(name)
+        get_nested(&self.bindings, scope, name)
     }
 
     pub fn lookup_alias(&self, scope: &ModuleName, name: &Name) -> Option<&Alias> {
-        self.aliases.get(scope)?.get(name)
+        get_nested(&self.aliases, scope, name)
     }
 
     /// Follow a chain of local aliases to its terminal binding.
@@ -215,7 +221,7 @@ impl AliasTable {
     }
 
     pub fn lookup_alias(&self, scope: &ModuleName, name: &Name) -> Option<&Alias> {
-        self.aliases.get(scope)?.get(name)
+        get_nested(&self.aliases, scope, name)
     }
 
     /// Follow a chain of local aliases to its terminal binding.
@@ -258,9 +264,7 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
     }
 
     fn add_alias(&mut self, name: Name, rhs: Alias) {
-        let scope = self.cursor.scope();
-        let aliases = self.aliases.entry(scope).or_default();
-        aliases.insert(name, rhs);
+        self.scope_aliases_mut().insert(name, rhs);
     }
 
     /// Remove any existing alias for `name` in the current scope. Called when a
@@ -270,6 +274,16 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
         if let Some(scope_aliases) = self.aliases.get_mut(&self.cursor.scope()) {
             scope_aliases.remove(name);
         }
+    }
+
+    /// The alias currently bound to `name` in `scope`, if any.
+    fn existing_alias(&self, scope: &ModuleName, name: &Name) -> Option<Alias> {
+        get_nested(&self.aliases, scope, name).cloned()
+    }
+
+    fn scope_aliases_mut(&mut self) -> &mut Aliases {
+        let scope = self.cursor.scope();
+        self.aliases.entry(scope).or_default()
     }
 
     fn extract_aliases(&mut self, body: &[Stmt]) {
@@ -358,12 +372,7 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
         if let Some(res) = r {
             if res.definition.is_import() {
                 // Reuse the import's existing alias entry so e.g. `d = c` points at c's target.
-                if let Some(existing) = self
-                    .aliases
-                    .get(&res.scope)
-                    .and_then(|a| a.get(&res.name))
-                    .cloned()
-                {
+                if let Some(existing) = self.existing_alias(&res.scope, &res.name) {
                     self.add_alias(name.clone(), existing);
                 } else if let Some(rhs_name) = res.try_qualified_name() {
                     // We cannot resolve this to a type, but we know it's an imported value
@@ -375,11 +384,8 @@ impl<'a, 'b> AliasTableBuilder<'a, 'b> {
                 }
             } else if matches!(rhs, Expr::Name(_)) {
                 let global_alias = self
-                    .aliases
-                    .get(&res.scope)
-                    .and_then(|a| a.get(&res.name))
-                    .filter(|a| matches!(a, Alias::Global(_)))
-                    .cloned();
+                    .existing_alias(&res.scope, &res.name)
+                    .filter(|a| matches!(a, Alias::Global(_)));
                 if let Some(existing) = global_alias {
                     // The rhs already carries a global binding (an import bound to
                     // a local). Snapshot it so that a later reassignment of the rhs
@@ -505,8 +511,7 @@ impl<'a, 'b> BindingsTableBuilder<'a, 'b> {
     }
 
     fn add_binding(&mut self, name: Name, value: Value) {
-        let scope = self.cursor.scope();
-        let bindings = self.bindings.entry(scope).or_default();
+        let bindings = self.scope_bindings_mut();
         // A variable assigned both a concrete type and `None` (e.g. the common
         // `x = factory()` / `except: x = None` fallback) keeps its non-`None`
         // type for method resolution: a method call is only meaningful on the
@@ -522,6 +527,11 @@ impl<'a, 'b> BindingsTableBuilder<'a, 'b> {
             return;
         }
         bindings.insert(name, value);
+    }
+
+    fn scope_bindings_mut(&mut self) -> &mut Bindings {
+        let scope = self.cursor.scope();
+        self.bindings.entry(scope).or_default()
     }
 
     /// Resolve an expression to the class it names, if any.
@@ -654,11 +664,13 @@ impl<'a, 'b> BindingsTableBuilder<'a, 'b> {
     }
 
     fn get_existing_binding(&self, scope: &ModuleName, name: &Name) -> Value {
-        let val = self.bindings.get(scope).map(|b| b.get(name));
-        match val {
-            Some(Some(x)) => x.clone(),
-            _ => Value::Unknown,
-        }
+        self.existing_binding(scope, name)
+            .cloned()
+            .unwrap_or(Value::Unknown)
+    }
+
+    fn existing_binding(&self, scope: &ModuleName, name: &Name) -> Option<&Value> {
+        get_nested(&self.bindings, scope, name)
     }
 
     fn get_existing_alias_binding(&self, scope: &ModuleName, name: &Name) -> Value {

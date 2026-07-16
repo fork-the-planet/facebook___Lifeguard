@@ -352,9 +352,8 @@ impl LibraryCache {
 
         let promoted = !to_promote.is_empty();
         for (module_name, func_name) in to_promote {
-            if let Some(info) = func_safety_by_module
-                .get_mut(&module_name)
-                .and_then(|fs| fs.get_mut(&func_name))
+            if let Some(info) =
+                get_function_safety_mut(func_safety_by_module, &module_name, &func_name)
             {
                 info.verdict = FunctionSafety::Safe;
                 globally_safe_funcs.insert(func_name);
@@ -688,12 +687,28 @@ fn lookup_callee_info<'a>(
     for (parent, dot_pos) in callee.iter_parents() {
         if module_names.contains(&parent) {
             let local_name = &callee.as_str()[dot_pos + 1..];
-            return func_safety_by_module
-                .get(&parent)
-                .and_then(|fs| fs.get(local_name));
+            return get_function_safety(func_safety_by_module, &parent, local_name);
         }
     }
     None
+}
+
+/// Get a function's safety info from the nested module -> name map.
+pub(crate) fn get_function_safety<'a>(
+    map: &'a HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+    module: &ModuleName,
+    name: &str,
+) -> Option<&'a FunctionSafetyInfo> {
+    map.get(module)?.get(name)
+}
+
+/// Mutable version for updating verdicts in place.
+pub(crate) fn get_function_safety_mut<'a>(
+    map: &'a mut HashMap<ModuleName, HashMap<String, FunctionSafetyInfo>>,
+    module: &ModuleName,
+    name: &str,
+) -> Option<&'a mut FunctionSafetyInfo> {
+    map.get_mut(module)?.get_mut(name)
 }
 
 /// Resolve mutation candidates against per-function safety verdicts.
@@ -727,9 +742,8 @@ pub(crate) fn apply_mutation_candidates<'a>(
                 }
                 (MutationCandidateSite::ModuleScope { .. }, false) => {}
                 (MutationCandidateSite::Function { name }, true) => {
-                    if let Some(info) = func_safety_by_module
-                        .get_mut(&module_name)
-                        .and_then(|fs| fs.get_mut(name.as_str()))
+                    if let Some(info) =
+                        get_function_safety_mut(func_safety_by_module, &module_name, name.as_str())
                     {
                         info.verdict = FunctionSafety::Unsafe;
                     }
@@ -747,9 +761,8 @@ pub(crate) fn apply_mutation_candidates<'a>(
                     ) {
                         continue;
                     }
-                    if let Some(info) = func_safety_by_module
-                        .get_mut(&module_name)
-                        .and_then(|fs| fs.get_mut(name.as_str()))
+                    if let Some(info) =
+                        get_function_safety_mut(func_safety_by_module, &module_name, name.as_str())
                     {
                         info.missing_dep_callees.remove(&candidate.callee);
                         if info.verdict == FunctionSafety::UnsafeMissingDep

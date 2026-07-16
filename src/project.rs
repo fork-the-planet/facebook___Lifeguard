@@ -26,6 +26,8 @@ use crate::analyzer;
 use crate::analyzer::AnalyzedModule;
 use crate::cache::apply_mutation_candidates;
 use crate::cache::can_promote_missing_dep_function;
+use crate::cache::get_function_safety;
+use crate::cache::get_function_safety_mut;
 use crate::class::Class;
 use crate::class::ClassTable;
 use crate::class::FieldKind;
@@ -1401,7 +1403,7 @@ impl ProjectInfo {
                 break;
             }
             for (m, name) in to_promote {
-                if let Some(info) = view.get_mut(&m).and_then(|fs| fs.get_mut(&name)) {
+                if let Some(info) = get_function_safety_mut(&mut view, &m, &name) {
                     info.verdict = FunctionSafety::Safe;
                     globally_safe_funcs.insert(name.clone());
                     changed.insert((m, name));
@@ -1413,7 +1415,7 @@ impl ProjectInfo {
         for (module, local) in &changed {
             let fqn = ModuleName::from_str(&format!("{}.{}", module.as_str(), local));
             if let Some(mut entry) = state.function_safety.get_mut(&fqn) {
-                if let Some(info) = view.get(module).and_then(|fs| fs.get(local)) {
+                if let Some(info) = get_function_safety(&view, module, local) {
                     entry.verdict = info.verdict;
                 }
             }
