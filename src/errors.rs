@@ -100,7 +100,7 @@ pub enum ErrorKind {
     /// to annotate it with.  Unknown effects are always treated as safety errors.
     UnknownEffects,
 
-    /// A call has more than 64 positional arguments, exceeding the tracking bitset.
+    /// A call has more than MAX_ARGS positional arguments, exceeding the tracking bitset.
     TooManyArgs,
 }
 

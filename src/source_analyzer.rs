@@ -56,6 +56,7 @@ use crate::effects::CallKind;
 use crate::effects::Effect;
 use crate::effects::EffectData;
 use crate::effects::EffectKind;
+use crate::effects::MAX_ARGS;
 use crate::exports::Attribute;
 use crate::exports::Exports;
 use crate::format;
@@ -420,7 +421,7 @@ impl<'a> SourceAnalyzer<'a> {
                         // at or after `i`; args are visited in increasing index, so
                         // the first star seen is the smallest such index.
                         unsafe_args_expansion_min.get_or_insert(i);
-                    } else if i < 64 {
+                    } else if i < MAX_ARGS {
                         unsafe_indices |= 1u64 << i;
                     }
                 }
@@ -600,11 +601,11 @@ impl<'a> SourceAnalyzer<'a> {
 
         let resolved = self.resolve_function_name(func, args, output);
 
-        // >64 positional args overflow the `unsafe_indices` bitset, so we fall
-        // back to a conservative `TooManyArgs` error — unless a stub provides the
-        // callee's effect, in which case that effect governs instead.
+        // More than MAX_ARGS positional args overflow the `unsafe_indices` bitset,
+        // so we fall back to a conservative `TooManyArgs` error — unless a stub
+        // provides the callee's effect, in which case that effect governs instead.
         if let Some(a) = args
-            && a.args.len() > 64
+            && a.args.len() > MAX_ARGS
             && !resolved
                 .as_ref()
                 .is_some_and(|(_, fname)| self.call_effect_from_stub(fname))

@@ -96,7 +96,7 @@ pub enum EffectKind {
     Mutation,
     // Marks a dunder method.
     Dunder,
-    // Call has more than 64 positional arguments, exceeding the tracking bitset.
+    // Call has more than MAX_ARGS positional arguments, exceeding the tracking bitset.
     TooManyArgs,
 }
 
@@ -177,6 +177,12 @@ pub enum ArgSlot {
     StarExpansion(usize),
 }
 
+/// The maximum number of positional arguments tracked precisely: positions are
+/// stored in the `unsafe_arg_indices` u64 bitset, so only the first `MAX_ARGS`
+/// can be represented. Calls with more fall back to a conservative `TooManyArgs`
+/// error. Tied to the width of `unsafe_arg_indices` (`u64`).
+pub(crate) const MAX_ARGS: usize = 64;
+
 /// The set of call arguments that carry an imported variable, plus the
 /// imprecision flags from `*args`/`**kwargs` expansion.
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Default, Serialize, Deserialize)]
@@ -198,7 +204,7 @@ pub struct ImportedArgs {
 impl ImportedArgs {
     pub fn has_unsafe_arg_index(&self, idx: usize) -> bool {
         self.unsafe_args_expansion_min.is_some_and(|min| idx >= min)
-            || (idx < 64 && (self.unsafe_arg_indices & (1u64 << idx)) != 0)
+            || (idx < MAX_ARGS && (self.unsafe_arg_indices & (1u64 << idx)) != 0)
     }
 
     pub fn has_unsafe_keywords(&self) -> bool {
